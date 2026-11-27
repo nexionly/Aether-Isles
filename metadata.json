@@ -1,0 +1,8 @@
+{
+  "name": "Aether Isles: Skybridge Siege",
+  "description": "A 2D isometric sky-island real-time strategy game featuring polyomino bridge building, Aether Vent crystal harvesting, Wind, Rain, and Thunder elemental aspects, tactical tower combat, and Altar rituals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
