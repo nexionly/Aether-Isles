@@ -9,14 +9,18 @@ import {
   clampOpponentCount,
   getAiFuryForIndex,
   getGridSizeForOpponents,
+  getInitialUnlockedTechs,
   randomTetrominoKey,
 } from './catalog';
+import { getDifficultyProfile } from './difficulty';
 import { recomputePowerGrids } from './pathfinding';
 import type {
+  AerialUnit,
   AiFactionId,
   CaptureExplosion,
   Crystal,
   Difficulty,
+  EnergyFenceLink,
   FactionId,
   FactionState,
   FloatingText,
@@ -34,6 +38,7 @@ import type {
   SacredSiteState,
   Structure,
   StructureKind,
+  TechUnlockOption,
   Tile,
   VictoryRules,
 } from './types';
@@ -48,6 +53,8 @@ export interface WorldState {
   structures: Structure[];
   priests: Priest[];
   golems: Golem[];
+  aerialUnits: AerialUnit[];
+  energyFences: EnergyFenceLink[];
   geysers: Geyser[];
   crystals: Crystal[];
   projectiles: Projectile[];
@@ -60,6 +67,8 @@ export interface WorldState {
   factions: Record<FactionId, FactionState>;
   sacredSites: SacredSiteState[];
   victoryRules: VictoryRules;
+  fogGrid: Uint8Array; // 0 = unexplored, 1 = explored, 2 = visible
+  pendingTechChoices: TechUnlockOption[] | null;
   difficulty: Difficulty;
   elapsedSeconds: number;
   nextEntityId: number;
@@ -112,6 +121,7 @@ function createEmptyGrid(gridSize: number, seedOffset: number): Tile[][] {
         poweredMask: 0,
         variant: hash2D(x, y, seedOffset),
         hitFlash: 0,
+        unpoweredSeconds: 0,
       });
     }
     tiles.push(row);
@@ -791,6 +801,9 @@ export function createInitialWorld(
       task: 'IDLE',
       targetCrystalId: null,
       carryingCrystalValue: 0,
+      captureTargetPriestId: null,
+      carryingPriestId: null,
+      repairTarget: null,
       path: [],
       repathCooldown: 0,
       hitFlash: 0,
@@ -822,6 +835,12 @@ export function createInitialWorld(
       animPhase: rng() * Math.PI * 2,
       sacrificeTimer: 0,
       sacrificedBy: null,
+      shieldTimer: 0,
+      abilityCooldowns: {
+        RECALL: 0,
+        SANCTUARY: 0,
+        TEMPEST_CAST: 0,
+      },
     });
   };
 
@@ -956,7 +975,7 @@ export function createInitialWorld(
     }
   });
 
-  const aiStartBonus = difficulty === 'STORMLORD' ? 40 : difficulty === 'ARCHON' ? 15 : 0;
+  const aiStartBonus = getDifficultyProfile(difficulty).startingAetherBonus;
 
   const factions = {} as Record<FactionId, FactionState>;
   factions.PLAYER = {
@@ -973,16 +992,18 @@ export function createInitialWorld(
     towersDestroyed: 0,
     eliminated: false,
     dominanceSeconds: 0,
+    unlockedTechs: getInitialUnlockedTechs(playerFury),
   };
 
   AI_FACTION_IDS.forEach((aiId, index) => {
     const profile = AI_FACTION_PROFILES[aiId];
     const active = index < opponentCount;
+    const aiFury = getAiFuryForIndex(playerFury, index);
     factions[aiId] = {
       owner: aiId,
       label: profile.label,
       color: profile.color,
-      fury: getAiFuryForIndex(playerFury, index),
+      fury: aiFury,
       stormPower: active ? 220 + aiStartBonus : 0,
       knowledgeTier: 1,
       bridgeQueue: ['I4', 'L', randomTetrominoKey()],
@@ -992,6 +1013,7 @@ export function createInitialWorld(
       towersDestroyed: 0,
       eliminated: !active,
       dominanceSeconds: 0,
+      unlockedTechs: getInitialUnlockedTechs(aiFury),
     };
   });
 
@@ -1009,6 +1031,9 @@ export function createInitialWorld(
       guardedByNeutral: isl.role === 'SHRINE',
     }));
 
+  const fogGrid = new Uint8Array(gridSize * gridSize);
+  fogGrid.fill(victoryRules.fogOfWar ? 0 : 2);
+
   const state: WorldState = {
     gridSize,
     opponentCount,
@@ -1019,6 +1044,8 @@ export function createInitialWorld(
     structures,
     priests,
     golems,
+    aerialUnits: [],
+    energyFences: [],
     geysers,
     crystals,
     projectiles: [],
@@ -1031,6 +1058,8 @@ export function createInitialWorld(
     factions,
     sacredSites,
     victoryRules: { ...victoryRules, priestSacrifice: true },
+    fogGrid,
+    pendingTechChoices: null,
     difficulty,
     elapsedSeconds: 0,
     nextEntityId: nextId,

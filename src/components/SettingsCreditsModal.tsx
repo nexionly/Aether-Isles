@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import {
   ArrowLeft,
+  CloudFog,
   Compass,
   Crown,
   Disc3,
@@ -596,6 +597,59 @@ export function SettingsCreditsModal({
                     </div>
                   </div>
                 )}
+              </div>
+
+              {/* 5. Optional Fog of War & Scouting — Toggleable (Off by default) */}
+              <div
+                className={`rounded-lg p-4 border transition-colors ${
+                  victoryRules.fogOfWar
+                    ? 'bg-[#121d2b]/90 border-[#67e8f9]/40'
+                    : 'bg-[#0e1622]/75 border-[#d6bc86]/15 opacity-85'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div className="w-9 h-9 rounded-lg bg-[#1b293b] border border-[#67e8f9]/30 flex items-center justify-center shrink-0 mt-0.5">
+                      <CloudFog className="w-4 h-4 text-[#67e8f9]" />
+                    </div>
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-display text-sm font-bold text-[#eef2f6]">
+                          Fog of War & Scouting
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-[#1d2e42] text-[#a5f3fc] border border-[#67e8f9]/30">
+                          Optional
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#b4c6d9] leading-relaxed">
+                        Shrouds distant sky-islands in storm clouds until scouted. Build Sky
+                        Watchtowers or launch Solar Skiffs &amp; Dirigibles to reveal enemy setups.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={victoryRules.fogOfWar}
+                    aria-label="Toggle Fog of War and Scouting"
+                    onClick={() =>
+                      onUpdateVictoryRules({ fogOfWar: !victoryRules.fogOfWar })
+                    }
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors cursor-pointer mt-0.5 ${
+                      victoryRules.fogOfWar
+                        ? 'bg-[#67e8f9] border-[#a5f3fc]'
+                        : 'bg-[#1b2636] border-[#64748b]/50'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 rounded-full transition-transform ${
+                        victoryRules.fogOfWar
+                          ? 'translate-x-5.5 bg-[#131b26]'
+                          : 'translate-x-1 bg-[#94a3b8]'
+                      }`}
+                    />
+                  </button>
+                </div>
               </div>
             </div>
           </div>

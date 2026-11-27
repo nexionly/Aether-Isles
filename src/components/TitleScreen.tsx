@@ -1,11 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Play, Settings, SlidersHorizontal, Volume2, VolumeX, X } from 'lucide-react';
+import { BookOpen, CloudFog, Play, Settings, SlidersHorizontal, Volume2, VolumeX, X } from 'lucide-react';
 import { FURY_META, MAX_OPPONENTS, getMapScaleLabel } from '../game/catalog';
+import {
+  DIFFICULTY_ORDER,
+  DIFFICULTY_PROFILES,
+  getAverageActionCadence,
+} from '../game/difficulty';
 import type { Difficulty, Fury, VictoryRules } from '../game/types';
+import titleKeyArtImgUrl from '../assets/images/title_key_art_1795699734519.jpg';
 import { AetherIslesTitleLockup } from './Icons';
 import { PWAInstallButton } from './PWAInstallButton';
 
-const KEY_ART_SRC = '/src/assets/images/title_key_art_1795699734519.jpg';
+const KEY_ART_SRC = titleKeyArtImgUrl;
 
 interface TitleScreenProps {
   selectedFury: Fury;
@@ -20,6 +26,7 @@ interface TitleScreenProps {
   onStart: () => void;
   onOpenSettings: () => void;
   onOpenRules: () => void;
+  onToggleFogOfWar: () => void;
   onToggleMusicMute: () => void;
 }
 
@@ -34,47 +41,36 @@ interface DifficultyOption {
   stats: Array<{ label: string; value: string }>;
 }
 
-const DIFFICULTIES: DifficultyOption[] = [
-  {
-    key: 'INITIATE',
-    label: 'Acolyte',
-    detail: 'Measured pace',
-    accent: '#7dd3fc',
-    summary: 'Relaxed rival pacing for learning bridge lanes, tower counters, and altar rituals.',
+const DIFFICULTIES: DifficultyOption[] = DIFFICULTY_ORDER.map((key) => {
+  const p = DIFFICULTY_PROFILES[key];
+  const avgCadence = getAverageActionCadence(p).toFixed(1);
+  const millWord = p.maxWindmills === 1 ? 'Mill' : 'Mills';
+  return {
+    key: p.key,
+    label: p.label,
+    detail: p.detail,
+    accent: p.accent,
+    summary: p.summary,
     stats: [
-      { label: 'Passive Aether', value: '82% (+0 start)' },
-      { label: 'Action Cadence', value: '~4.2s / move' },
-      { label: 'Economy Caps', value: '3 Golems · 2 Mills' },
-      { label: 'Overload Hoard', value: 'Off' },
+      {
+        label: 'Passive Aether',
+        value: `${Math.round(p.passiveAetherMultiplier * 100)}% (+${p.startingAetherBonus} start)`,
+      },
+      {
+        label: 'Action Cadence',
+        value: `~${avgCadence}s / move (${p.openingGraceSeconds.toFixed(1)}s start)`,
+      },
+      {
+        label: 'Economy Caps',
+        value: `${p.desiredGolems} Golems · ${p.maxWindmills} ${millWord}`,
+      },
+      {
+        label: 'Overload Hoard',
+        value: p.overloadHoardEnabled ? 'Active' : 'Off',
+      },
     ],
-  },
-  {
-    key: 'ARCHON',
-    label: 'Archon',
-    detail: 'Balanced rival',
-    accent: '#f0b429',
-    summary: 'Fair resource economy with steady bridge expansion, defensive reactions, and objective play.',
-    stats: [
-      { label: 'Passive Aether', value: '100% (+15 start)' },
-      { label: 'Action Cadence', value: '~2.8s / move' },
-      { label: 'Economy Caps', value: '4 Golems · 3 Mills' },
-      { label: 'Overload Hoard', value: 'Active' },
-    ],
-  },
-  {
-    key: 'STORMLORD',
-    label: 'Ascendant',
-    detail: 'Relentless siege',
-    accent: '#fb923c',
-    summary: 'Accelerated Aether generation, rapid island expansion, and dense forward tower lines.',
-    stats: [
-      { label: 'Passive Aether', value: '118% (+40 start)' },
-      { label: 'Action Cadence', value: '~1.9s / move' },
-      { label: 'Economy Caps', value: '5 Golems · 4 Mills' },
-      { label: 'Overload Hoard', value: 'Active' },
-    ],
-  },
-];
+  };
+});
 
 export function TitleScreen({
   selectedFury,
@@ -89,6 +85,7 @@ export function TitleScreen({
   onStart,
   onOpenSettings,
   onOpenRules,
+  onToggleFogOfWar,
   onToggleMusicMute,
 }: TitleScreenProps) {
   const [showGuide, setShowGuide] = useState(false);
@@ -324,11 +321,11 @@ export function TitleScreen({
             </div>
           </div>
 
-          {/* Active Victory Rules Strip */}
-          <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg bg-[#111a26]/90 border border-[#d6bc86]/20">
+          {/* Active Victory Rules & Optional Fog of War Strip */}
+          <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-lg bg-[#111a26]/90 border border-[#d6bc86]/20">
             <div className="min-w-0">
               <div className="text-[11px] font-semibold text-[#f5dfaa] tracking-wide mb-0.5">
-                Victory Conditions
+                Match Rules &amp; Victory Conditions
               </div>
               <div className="text-xs text-[#bfd0e2] truncate">
                 {[
@@ -338,19 +335,36 @@ export function TitleScreen({
                   victoryRules.aetherOverload
                     ? `Overload (${victoryRules.aetherOverloadTarget.toLocaleString()} AE)`
                     : null,
+                  victoryRules.fogOfWar ? 'Fog of War' : null,
                 ]
                   .filter(Boolean)
                   .join(' · ')}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={onOpenRules}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold text-[#f5dfaa] bg-[#1b293b] border border-[#d6bc86]/30 hover:border-[#f0b429]/65 hover:bg-[#23344a] transition-colors cursor-pointer shrink-0 whitespace-nowrap"
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5 text-[#f0b429]" />
-              Configure
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={victoryRules.fogOfWar}
+                onClick={onToggleFogOfWar}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
+                  victoryRules.fogOfWar
+                    ? 'bg-[#163142] text-[#a5f3fc] border-[#67e8f9]/60 hover:bg-[#1b3d52]'
+                    : 'bg-[#172332] text-[#a5b9cf] border-[#d6bc86]/25 hover:text-white hover:border-[#d6bc86]/50'
+                }`}
+              >
+                <CloudFog className={`w-3.5 h-3.5 ${victoryRules.fogOfWar ? 'text-[#67e8f9]' : 'text-[#8ea5bc]'}`} />
+                Fog: {victoryRules.fogOfWar ? 'On' : 'Off'}
+              </button>
+              <button
+                type="button"
+                onClick={onOpenRules}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold text-[#f5dfaa] bg-[#1b293b] border border-[#d6bc86]/30 hover:border-[#f0b429]/65 hover:bg-[#23344a] transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-[#f0b429]" />
+                Configure
+              </button>
+            </div>
           </div>
 
           {/* Primary Start CTA + Field Guide + Android PWA Install */}

@@ -1,7 +1,9 @@
 {
-  "name": "react-example",
+  "name": "aether-isles-skybridge-siege",
+  "version": "1.0.0",
+  "description": "A 2D isometric sky-island real-time strategy game featuring polyomino sky-bridges, elemental aspects, Sky Fleets, and Altar rituals.",
+  "license": "MIT",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",

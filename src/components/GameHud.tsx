@@ -9,28 +9,48 @@ import {
   MousePointer2,
   Pause,
   Radar,
+  Recycle,
   RotateCw,
   Settings,
+  Shield,
+  Sparkles,
   Target,
   Volume2,
   VolumeX,
+  Wind,
+  Wrench,
   Zap,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import {
+  AERIAL_CATALOG,
+  AERIAL_UNIT_ORDER,
+  ALIGNMENT_COLORS,
   FURY_META,
   SPEED_STEPS,
   STRUCTURE_CATALOG,
+  SUN_UTILITY_UNITS,
   TETROMINOES,
   directionLabel,
+  getCombatPalette,
   getNextSpeedMultiplier,
-  getPaletteForFury,
+  isAerialUnitKind,
   isAiFaction,
 } from '../game/catalog';
-import type { BuildOptionKind, Fury, HudSnapshot, PlacementMode } from '../game/types';
+import type {
+  AerialUnitKind,
+  BuildOptionKind,
+  Fury,
+  HudSnapshot,
+  PlacementMode,
+  PriestAbilityId,
+  TechUnlockKey,
+} from '../game/types';
 import {
+  AerialGlyph,
   GolemGlyph,
+  PriestGlyph,
   StormCrystalIcon,
   StructureGlyph,
   TetrominoPreview,
@@ -43,6 +63,10 @@ interface GameHudProps {
   onSetPlacement: (mode: PlacementMode) => void;
   onRotate: () => void;
   onSummonGolem: () => void;
+  onSummonAerial: (kind: AerialUnitKind) => void;
+  onReclaimSelected: () => void;
+  onCastPriestAbility: (abilityId: PriestAbilityId) => void;
+  onChooseTechUnlock: (key: TechUnlockKey) => void;
   onToggleSpeed: () => void;
   onToggleMute: () => void;
   onToggleRangeOverlay: () => void;
@@ -50,11 +74,14 @@ interface GameHudProps {
   onOpenSettings: () => void;
   onPause: () => void;
   onCenterHome: () => void;
+  onFocusPriest: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onCapturePriest: (priestId: number) => void;
   onFocusSacredSite: () => void;
 }
+
+type DockTab = 'COMBAT' | 'UTILITY' | 'SKY';
 
 function formatClock(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60);
@@ -69,6 +96,10 @@ export function GameHud({
   onSetPlacement,
   onRotate,
   onSummonGolem,
+  onSummonAerial,
+  onReclaimSelected,
+  onCastPriestAbility,
+  onChooseTechUnlock,
   onToggleSpeed,
   onToggleMute,
   onToggleRangeOverlay,
@@ -76,6 +107,7 @@ export function GameHud({
   onOpenSettings,
   onPause,
   onCenterHome,
+  onFocusPriest,
   onZoomIn,
   onZoomOut,
   onCapturePriest,
@@ -87,6 +119,7 @@ export function GameHud({
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     typeof window !== 'undefined' ? window.innerWidth : 1280
   );
+  const [dockTab, setDockTab] = useState<DockTab>('COMBAT');
   const [uiTooltip, setUiTooltip] = useState<{
     key: string;
     rect: { left: number; right: number; top: number; bottom: number; width: number };
@@ -133,19 +166,20 @@ export function GameHud({
   }, []);
 
   const furyMeta = FURY_META[hud.playerFury];
-  const palette = getPaletteForFury(hud.playerFury);
+  const combatPalette = getCombatPalette(hud.playerFury, hud.unlockedTechs);
+  const activeStructurePalette = dockTab === 'COMBAT' ? combatPalette : SUN_UTILITY_UNITS;
 
   // Proportional scaling so top HUD & bottom dock stay cohesive and never clip off-screen
   const isCompactTop = viewportWidth < 768;
   const isUltraCompactTop = viewportWidth < 520;
   const padX = viewportWidth < 640 ? 20 : 28;
   const topNaturalSpan = isUltraCompactTop
-    ? 424
+    ? 454
     : isCompactTop
-      ? 554
+      ? 588
       : hud.opponentCount > 1
-        ? 1034
-        : 984;
+        ? 1104
+        : 1054;
   const topScale = Math.min(1, Math.max(0.7, (viewportWidth - padX) / topNaturalSpan));
   const centerInline = viewportWidth >= (hud.opponentCount > 1 ? 1420 : 1360);
   const minimapReserve = viewportWidth >= 640 ? Math.ceil(224 * topScale) : 12;
@@ -153,7 +187,9 @@ export function GameHud({
     ? Math.min(440, Math.max(240, viewportWidth - topNaturalSpan - 48))
     : Math.min(440, Math.max(180, viewportWidth - minimapReserve * 2 - 12));
   const dockScale =
-    viewportWidth >= 640 ? Math.min(1, Math.max(0.68, (viewportWidth - padX) / 965)) : 1;
+    viewportWidth >= 640
+      ? Math.min(1, Math.max(0.66, (viewportWidth - padX) / Math.max(980, 560 + combatPalette.length * 72)))
+      : 1;
 
   const handleMinimapClientCoords = (canvas: HTMLCanvasElement, clientX: number, clientY: number) => {
     const rect = canvas.getBoundingClientRect();
@@ -163,7 +199,13 @@ export function GameHud({
   };
 
   // Determine compact active placement / inspector readout above bottom dock
-  let contextLine: { title: string; detail: string; accent?: string; actionId?: number } | null = null;
+  let contextLine: {
+    title: string;
+    detail: string;
+    accent?: string;
+    actionId?: number;
+    reclaimRefund?: number;
+  } | null = null;
   if (hud.placement.type === 'BRIDGE') {
     const key = hud.bridgeQueue[hud.placement.queueIndex];
     const def = TETROMINOES[key];
@@ -180,7 +222,7 @@ export function GameHud({
       detail: def.directional
         ? `${def.description} Facing ${directionLabel(hud.placement.facing)} (R to rotate).`
         : def.description,
-      accent: furyMeta.color,
+      accent: ALIGNMENT_COLORS[def.alignment] ?? furyMeta.color,
     };
   } else if (hud.selected) {
     contextLine = {
@@ -188,6 +230,7 @@ export function GameHud({
       detail: `${hud.selected.statusText} — ${hud.selected.subtitle}`,
       accent: hud.selected.factionColor ?? (isAiFaction(hud.selected.owner) ? '#f87171' : '#f0b429'),
       actionId: hud.selected.canCommandCapture ? hud.selected.id : undefined,
+      reclaimRefund: hud.selected.canReclaim ? hud.selected.reclaimRefund : undefined,
     };
   }
 
@@ -354,6 +397,21 @@ export function GameHud({
           accent: '#f0b429',
           body: 'Snap the camera straight back to your High Temple and Sacrificial Altar.',
         };
+      case 'find_priest': {
+        const statusText =
+          hud.playerPriestState === 'STUNNED'
+            ? 'STUNNED — protect them immediately!'
+            : hud.playerPriestState === 'CARRIED'
+              ? 'CAPTURED — being dragged toward a rival Altar!'
+              : `${hud.playerPriestHp}/${hud.playerPriestMaxHp} HP · Active`;
+        return {
+          title: 'Find High Priest',
+          badge: 'Key P',
+          accent: hud.playerPriestState === 'ACTIVE' ? furyMeta.color : '#fde047',
+          body: `Centers the camera on your High Priest, pings their location, and selects them for immediate movement.`,
+          meta: `Status: ${statusText}`,
+        };
+      }
       case 'ranges':
         return {
           title: 'Tower Range Overlay',
@@ -461,20 +519,61 @@ export function GameHud({
           const kind = key.slice('structure:'.length) as BuildOptionKind;
           const def = STRUCTURE_CATALOG[kind];
           if (!def) return null;
-          const locked = def.tier > hud.knowledgeTier;
+          const locked = !hud.unlockedTechs.includes(kind);
           const parts: string[] = [`HP ${def.maxHp}`];
           if (def.range > 0) parts.push(`Range ${def.range} (${def.directional ? 'Lane' : '360°'})`);
           if (def.damage > 0) parts.push(`${def.damage} DMG @ ${def.fireRate}/s`);
           if (def.passiveIncome) parts.push(`+${def.passiveIncome} AE/s`);
           if (def.slowAuraRadius) parts.push(`Slow Aura ${def.slowAuraRadius}`);
+          if (def.visionRadius && def.visionRadius >= 10) parts.push(`Vision ${def.visionRadius}`);
+          if (def.isPowerHub) parts.push('Independent Power Hub');
+          if (def.isFencePylon) parts.push('Links up to 5 tiles');
+          if (def.isMine) parts.push('95 Splash · Hidden');
           return {
             title: def.name,
-            badge: locked ? 'Altar Tier 2' : `${def.cost} AE`,
-            accent: locked ? '#c084fc' : def.alignment === 'SUN' ? '#f0b429' : furyMeta.color,
+            badge: locked ? 'Altar Mastery' : `${def.cost} AE`,
+            accent: locked ? '#c084fc' : ALIGNMENT_COLORS[def.alignment] ?? furyMeta.color,
             body: def.description,
             meta: locked
-              ? `Locked — sacrifice a Rogue/rival Priest or shatter a rival High Temple to unlock. (${parts.join(' · ')})`
+              ? `Locked — complete an Altar Sacrifice or shatter a rival High Temple to unlock. (${parts.join(' · ')})`
               : parts.join(' · '),
+          };
+        }
+        if (key.startsWith('aerial:')) {
+          const kind = key.slice('aerial:'.length) as AerialUnitKind;
+          const def = AERIAL_CATALOG[kind];
+          if (!def) return null;
+          const locked = !hud.unlockedTechs.includes(kind);
+          const parts: string[] = [`HP ${def.maxHp}`, `Speed ${def.speed}`, `Vision ${def.visionRadius}`];
+          if (def.damage > 0) parts.push(`${def.damage} DMG @ ${def.fireRate}/s`);
+          if (def.canTransportPriest) parts.push('Airlifts Stunned Priests');
+          return {
+            title: def.name,
+            badge: locked ? 'Altar Mastery' : `${def.cost} AE`,
+            accent: locked ? '#c084fc' : ALIGNMENT_COLORS[def.alignment] ?? '#67e8f9',
+            body: def.description,
+            meta: locked
+              ? `Unlock via Altar Knowledge Sacrifice (${parts.join(' · ')})`
+              : `${parts.join(' · ')} · Fleet ${hud.aerialCount}/${hud.maxAerialUnits}`,
+          };
+        }
+        if (key.startsWith('ability:')) {
+          const id = key.slice('ability:'.length) as PriestAbilityId;
+          const ab = hud.priestAbilities.find((a) => a.id === id);
+          if (!ab) return null;
+          return {
+            title: ab.name,
+            badge: ab.cooldown > 0 ? `${ab.cooldown}s CD` : `${ab.cost} AE · Key ${ab.hotkey}`,
+            accent: '#fde047',
+            body: ab.description,
+            meta:
+              hud.playerPriestState !== 'ACTIVE'
+                ? 'Requires your High Priest to be active.'
+                : ab.cooldown > 0
+                  ? `Recharging (${ab.cooldown}s remaining)`
+                  : hud.stormPower < ab.cost
+                    ? `Needs ${ab.cost - hud.stormPower} more AE`
+                    : `Ready to invoke (Press ${ab.hotkey})`,
           };
         }
         return null;
@@ -753,11 +852,19 @@ export function GameHud({
 
                 <div
                   {...tipProps('priests')}
-                  className="flex items-center gap-2 text-[11px] font-mono-tabular cursor-help"
+                  className="flex items-center gap-2 text-[11px] font-mono-tabular"
                 >
-                  <span className="text-[#a7f3d0]">
-                    Priest {hud.playerPriestState === 'STUNNED' ? 'STUNNED' : `${hud.playerPriestHp}/${hud.playerPriestMaxHp}`}
-                  </span>
+                  <button
+                    type="button"
+                    onClick={onFocusPriest}
+                    className={`transition-colors cursor-pointer hover:underline underline-offset-2 ${
+                      hud.playerPriestState === 'STUNNED' || hud.playerPriestState === 'CARRIED'
+                        ? 'text-[#fde047] font-semibold'
+                        : 'text-[#a7f3d0] hover:text-white'
+                    }`}
+                  >
+                    Priest {hud.playerPriestState === 'STUNNED' ? 'STUNNED' : hud.playerPriestState === 'CARRIED' ? 'CAPTURED' : `${hud.playerPriestHp}/${hud.playerPriestMaxHp}`}
+                  </button>
                   <span className="text-[#9cb2c9]">/</span>
                   {hud.opponentCount === 1 ? (
                     <span className="text-[#fca5a5]">
@@ -975,6 +1082,29 @@ export function GameHud({
             </button>
             <button
               type="button"
+              onClick={onFocusPriest}
+              {...tipProps('find_priest')}
+              aria-label="Find and select your High Priest (Key P)"
+              className={`px-2 py-1 rounded border text-xs font-semibold transition-all duration-150 cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                hud.playerPriestState === 'STUNNED' || hud.playerPriestState === 'CARRIED'
+                  ? 'bg-[#facc15]/20 border-[#fde047] text-[#fef08a] hover:bg-[#facc15]/30'
+                  : hud.selected?.kind === 'PRIEST' && hud.selected.owner === 'PLAYER'
+                    ? 'bg-[#25364a] border-[#f0b429] text-[#fef3c7]'
+                    : 'bg-[#1a2738]/90 border-[#d6bc86]/35 text-[#f5dfaa] hover:text-white hover:bg-[#25364c] hover:border-[#f0b429]/70'
+              }`}
+            >
+              <PriestGlyph
+                color={
+                  hud.playerPriestState === 'STUNNED' || hud.playerPriestState === 'CARRIED'
+                    ? '#fde047'
+                    : furyMeta.color
+                }
+                className="w-3.5 h-3.5 shrink-0"
+              />
+              {!isCompactTop && <span>Priest</span>}
+            </button>
+            <button
+              type="button"
               onClick={onToggleRangeOverlay}
               {...tipProps('ranges')}
               aria-pressed={hud.rangeOverlay.enabled}
@@ -1109,33 +1239,146 @@ export function GameHud({
         </div>
       </div>
 
+      {/* ALTAR KNOWLEDGE 3-CHOICE TECH UNLOCK PICKER */}
+      {hud.phase === 'PLAYING' && hud.pendingTechChoices && hud.pendingTechChoices.length > 0 && (
+        <div className="pointer-events-auto fixed inset-x-0 top-1/2 -translate-y-1/2 z-30 flex justify-center px-4">
+          <div className="stone-frame rounded-xl p-4 sm:p-5 max-w-2xl w-full shadow-2xl border-[#f0b429]/60">
+            <div className="flex items-center justify-between gap-3 border-b border-[#d6bc86]/25 pb-2.5 mb-3.5">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-[#fde047]" />
+                <div>
+                  <h3 className="font-display text-base sm:text-lg font-bold text-[#fef3c7] leading-tight">
+                    Altar Knowledge Ascended
+                  </h3>
+                  <p className="text-[11px] text-[#b4c6d9]">
+                    Choose one Elemental Mastery, stolen rival tech, or Sky Fleet blueprint to unlock permanently this match.
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono-tabular uppercase tracking-wider px-2 py-0.5 rounded bg-[#f0b429]/20 text-[#fde047] border border-[#f0b429]/40 shrink-0">
+                Choose 1 of {hud.pendingTechChoices.length}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {hud.pendingTechChoices.map((opt) => {
+                const col = ALIGNMENT_COLORS[opt.alignment] ?? '#f0b429';
+                const aerial = isAerialUnitKind(opt.key);
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => onChooseTechUnlock(opt.key)}
+                    className="group text-left rounded-lg p-3 bg-[#131e2c]/95 border border-[#d6bc86]/30 hover:border-[#f0b429] hover:bg-[#1c2c40] transition-all duration-150 cursor-pointer flex flex-col justify-between gap-2.5"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                          style={{ backgroundColor: `${col}24`, color: col }}
+                        >
+                          {opt.badge}
+                        </span>
+                        <span className="font-mono-tabular text-[11px] font-bold text-[#f0b429]">
+                          {opt.cost} AE
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-lg bg-[#0d1520] border border-[#d6bc86]/25 flex items-center justify-center shrink-0">
+                          {aerial ? (
+                            <AerialGlyph kind={opt.key as AerialUnitKind} color={col} className="w-6 h-6" />
+                          ) : (
+                            <StructureGlyph kind={opt.key as BuildOptionKind} color={col} className="w-6 h-6" />
+                          )}
+                        </div>
+                        <div className="font-display text-sm font-bold text-[#f6ead0] group-hover:text-white leading-tight">
+                          {opt.name}
+                        </div>
+                      </div>
+                      <p className="text-[11px] leading-snug text-[#bfd0e2]">
+                        {opt.description}
+                      </p>
+                    </div>
+                    <div className="pt-1.5 border-t border-[#d6bc86]/15 text-[11px] font-semibold text-[#fde047] group-hover:text-white text-center">
+                      Unlock Blueprint
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* BOTTOM COMMAND DOCK */}
       <div
         style={dockScale < 1 ? { transform: `scale(${dockScale})` } : undefined}
-        className="flex flex-col items-center gap-2 origin-bottom"
+        className="flex flex-col items-center gap-1.5 origin-bottom"
       >
-        {/* Contextual Placement / Inspector Strip */}
-        {contextLine && (
-          <div
-            className={`pointer-events-auto stone-frame-subtle rounded-lg px-3.5 py-1.5 flex items-center gap-3 text-xs ${
-              viewportWidth < 640 ? 'max-w-[calc(100vw-20px)]' : 'max-w-2xl'
-            }`}
-          >
-            <span className="font-semibold whitespace-nowrap shrink-0" style={{ color: contextLine.accent ?? '#f5dfaa' }}>
-              {contextLine.title}
-            </span>
-            <span className="text-[#c1d0e0] truncate min-w-0">{contextLine.detail}</span>
-            {contextLine.actionId !== undefined && (
-              <button
-                type="button"
-                onClick={() => onCapturePriest(contextLine!.actionId!)}
-                className="px-2.5 py-1 rounded bg-[#f0b429] text-[#131b26] font-semibold hover:bg-[#f7c54b] cursor-pointer whitespace-nowrap shrink-0"
-              >
-                Send High Priest
-              </button>
-            )}
-          </div>
-        )}
+        {/* Contextual Placement / Inspector Strip + High Priest Active Abilities Row */}
+        <div className="flex flex-wrap items-center justify-center gap-2 max-w-full">
+          {contextLine && (
+            <div
+              className={`pointer-events-auto stone-frame-subtle rounded-lg px-3 py-1.5 flex items-center gap-2.5 text-xs ${
+                viewportWidth < 640 ? 'max-w-[calc(100vw-20px)]' : 'max-w-xl'
+              }`}
+            >
+              <span className="font-semibold whitespace-nowrap shrink-0" style={{ color: contextLine.accent ?? '#f5dfaa' }}>
+                {contextLine.title}
+              </span>
+              <span className="text-[#c1d0e0] truncate min-w-0">{contextLine.detail}</span>
+              {contextLine.actionId !== undefined && (
+                <button
+                  type="button"
+                  onClick={() => onCapturePriest(contextLine!.actionId!)}
+                  className="px-2.5 py-1 rounded bg-[#f0b429] text-[#131b26] font-semibold hover:bg-[#f7c54b] cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Capture
+                </button>
+              )}
+              {contextLine.reclaimRefund !== undefined && (
+                <button
+                  type="button"
+                  onClick={onReclaimSelected}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#233245] border border-[#f0b429]/45 text-[#fde68a] font-semibold hover:bg-[#2f425a] cursor-pointer whitespace-nowrap shrink-0"
+                  title="Recycle this structure for 60% Aether refund (Delete)"
+                >
+                  <Recycle className="w-3.5 h-3.5 text-[#f0b429]" />
+                  Reclaim +{contextLine.reclaimRefund} AE
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* High Priest Active Abilities Strip (Q / E / T) */}
+          {hud.playerPriestState !== 'SACRIFICED' && hud.priestAbilities.length > 0 && (
+            <div className="pointer-events-auto stone-frame-subtle rounded-lg px-2 py-1 flex items-center gap-1 text-[11px]">
+              <PriestGlyph color={furyMeta.color} className="w-3.5 h-3.5 mx-0.5 shrink-0" />
+              {hud.priestAbilities.map((ab) => (
+                <button
+                  key={ab.id}
+                  type="button"
+                  disabled={!ab.ready}
+                  onClick={() => onCastPriestAbility(ab.id)}
+                  {...tipProps(`ability:${ab.id}`)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                    ab.ready
+                      ? 'bg-[#1a2738] border-[#f0b429]/45 text-[#fef3c7] hover:bg-[#263850] hover:border-[#fde047] cursor-pointer'
+                      : 'bg-[#101824] border-[#d6bc86]/15 text-[#7f95ac] opacity-65 cursor-not-allowed'
+                  }`}
+                >
+                  <span className="font-mono-tabular text-[10px] text-[#f0b429]">{ab.hotkey}</span>
+                  <span>
+                    {ab.id === 'RECALL' ? 'Recall' : ab.id === 'SANCTUARY' ? 'Ward' : 'Surge'}
+                  </span>
+                  <span className="font-mono-tabular text-[10px] opacity-85">
+                    {ab.cooldown > 0 ? `${ab.cooldown}s` : `${ab.cost}`}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Main Compact Dock */}
         <div
@@ -1195,13 +1438,41 @@ export function GameHud({
 
           <div className="h-11 w-px bg-[#d6bc86]/20 shrink-0" />
 
-          {/* Select + Structure Build Palette + Summon Golem */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          {/* Category Switcher + Active Build/Fleet Palette */}
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Compact Vertical Category Tabs (Combat / Utility / Sky Fleet) */}
+            <div className="flex flex-col gap-1 shrink-0">
+              {(
+                [
+                  { id: 'COMBAT', label: 'Combat', Icon: Shield },
+                  { id: 'UTILITY', label: 'Utility', Icon: Wrench },
+                  { id: 'SKY', label: `Sky ${hud.aerialCount}/${hud.maxAerialUnits}`, Icon: Wind },
+                ] as const
+              ).map(({ id, label, Icon }) => {
+                const active = dockTab === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setDockTab(id)}
+                    className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
+                      active
+                        ? 'bg-[#25364a] text-[#fef3c7] border-[#f0b429]/70'
+                        : 'bg-[#111924] text-[#94acc4] border-[#d6bc86]/15 hover:text-white hover:border-[#d6bc86]/40'
+                    }`}
+                  >
+                    <Icon className="w-2.5 h-2.5 shrink-0" />
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+
             <button
               type="button"
               onClick={() => onSetPlacement({ type: 'SELECT' })}
               {...tipProps('select')}
-              className={`flex flex-col items-center justify-center w-[54px] h-[56px] rounded-lg border transition-colors cursor-pointer shrink-0 ${
+              className={`flex flex-col items-center justify-center w-[52px] h-[56px] rounded-lg border transition-colors cursor-pointer shrink-0 ${
                 hud.placement.type === 'SELECT'
                   ? 'bg-[#25364a] border-[#f0b429] text-white'
                   : 'bg-[#131c28] border-[#d6bc86]/20 text-[#b4c5d8] hover:border-[#d6bc86]/50'
@@ -1212,59 +1483,112 @@ export function GameHud({
               <span className="text-[9px] font-mono-tabular opacity-60">1</span>
             </button>
 
-            {palette.map((kind: BuildOptionKind, index: number) => {
-              const def = STRUCTURE_CATALOG[kind];
-              const locked = def.tier > hud.knowledgeTier;
-              const affordable = hud.stormPower >= def.cost;
-              const active = hud.placement.type === 'STRUCTURE' && hud.placement.kind === kind;
-              const col = def.alignment === 'SUN' ? '#f0b429' : furyMeta.color;
+            {dockTab !== 'SKY' ? (
+              activeStructurePalette.map((kind: BuildOptionKind, index: number) => {
+                const def = STRUCTURE_CATALOG[kind];
+                const locked = !hud.unlockedTechs.includes(kind);
+                const affordable = hud.stormPower >= def.cost;
+                const active = hud.placement.type === 'STRUCTURE' && hud.placement.kind === kind;
+                const col = ALIGNMENT_COLORS[def.alignment] ?? furyMeta.color;
 
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  {...tipProps(`structure:${kind}`)}
-                  onClick={() => {
-                    if (locked) return;
-                    onSetPlacement({
-                      type: 'STRUCTURE',
-                      kind,
-                      facing: active && hud.placement.type === 'STRUCTURE' ? hud.placement.facing : 0,
-                    });
-                  }}
-                  className={`relative flex flex-col items-center justify-center w-[66px] h-[56px] px-1 rounded-lg border transition-colors shrink-0 ${
-                    locked
-                      ? 'bg-[#111822] border-[#d6bc86]/15 opacity-60 cursor-not-allowed'
-                      : active
-                        ? 'bg-[#25364a] border-[#f0b429] cursor-pointer'
-                        : 'bg-[#131c28] border-[#d6bc86]/20 hover:border-[#d6bc86]/50 cursor-pointer'
-                  } ${!locked && !affordable ? 'opacity-60' : ''}`}
-                >
-                  <span className="absolute top-0.5 left-1.5 text-[9px] font-mono-tabular text-[#8da3ba]">
-                    {index + 2}
-                  </span>
-                  {locked ? (
-                    <>
-                      <Lock className="w-3.5 h-3.5 text-[#c084fc] mb-0.5" />
-                      <span className="text-[10px] font-medium text-[#cbd5e1] truncate max-w-full">
-                        {def.shortName}
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    {...tipProps(`structure:${kind}`)}
+                    onClick={() => {
+                      if (locked) return;
+                      onSetPlacement({
+                        type: 'STRUCTURE',
+                        kind,
+                        facing: active && hud.placement.type === 'STRUCTURE' ? hud.placement.facing : 0,
+                      });
+                    }}
+                    className={`relative flex flex-col items-center justify-center w-[66px] h-[56px] px-1 rounded-lg border transition-colors shrink-0 ${
+                      locked
+                        ? 'bg-[#111822] border-[#d6bc86]/15 opacity-60 cursor-not-allowed'
+                        : active
+                          ? 'bg-[#25364a] border-[#f0b429] cursor-pointer'
+                          : 'bg-[#131c28] border-[#d6bc86]/20 hover:border-[#d6bc86]/50 cursor-pointer'
+                    } ${!locked && !affordable ? 'opacity-60' : ''}`}
+                  >
+                    {dockTab === 'COMBAT' && index < 8 && (
+                      <span className="absolute top-0.5 left-1.5 text-[9px] font-mono-tabular text-[#8da3ba]">
+                        {index + 2}
                       </span>
-                      <span className="text-[9px] text-[#c084fc] whitespace-nowrap">Altar T2</span>
-                    </>
-                  ) : (
-                    <>
-                      <StructureGlyph kind={kind} color={col} className="w-5 h-5" />
-                      <span className="text-[10px] font-medium text-[#e2ebf5] truncate max-w-full leading-tight">
-                        {def.shortName}
-                      </span>
-                      <span className="font-mono-tabular text-[10px] font-semibold text-[#f0b429]">
-                        {def.cost}
-                      </span>
-                    </>
-                  )}
-                </button>
-              );
-            })}
+                    )}
+                    {locked ? (
+                      <>
+                        <Lock className="w-3.5 h-3.5 text-[#c084fc] mb-0.5" />
+                        <span className="text-[10px] font-medium text-[#cbd5e1] truncate max-w-full">
+                          {def.shortName}
+                        </span>
+                        <span className="text-[9px] text-[#c084fc] whitespace-nowrap">Altar T2</span>
+                      </>
+                    ) : (
+                      <>
+                        <StructureGlyph kind={kind} color={col} className="w-5 h-5" />
+                        <span className="text-[10px] font-medium text-[#e2ebf5] truncate max-w-full leading-tight">
+                          {def.shortName}
+                        </span>
+                        <span className="font-mono-tabular text-[10px] font-semibold text-[#f0b429]">
+                          {def.cost}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                );
+              })
+            ) : (
+              AERIAL_UNIT_ORDER.map((kind: AerialUnitKind) => {
+                const def = AERIAL_CATALOG[kind];
+                const locked = !hud.unlockedTechs.includes(kind);
+                const atCap = hud.aerialCount >= hud.maxAerialUnits;
+                const affordable = hud.stormPower >= def.cost;
+                const disabled = locked || atCap || !affordable;
+                const col = ALIGNMENT_COLORS[def.alignment] ?? '#67e8f9';
+
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    {...tipProps(`aerial:${kind}`)}
+                    onClick={() => {
+                      if (disabled) return;
+                      onSummonAerial(kind);
+                    }}
+                    aria-disabled={disabled}
+                    className={`relative flex flex-col items-center justify-center w-[72px] h-[56px] px-1 rounded-lg border transition-colors shrink-0 ${
+                      locked
+                        ? 'bg-[#111822] border-[#d6bc86]/15 opacity-60 cursor-not-allowed'
+                        : disabled
+                          ? 'bg-[#121a25] border-[#d6bc86]/20 opacity-55 cursor-not-allowed'
+                          : 'bg-[#152436] border-[#67e8f9]/45 hover:bg-[#1e334a] hover:border-[#67e8f9] cursor-pointer'
+                    }`}
+                  >
+                    {locked ? (
+                      <>
+                        <Lock className="w-3.5 h-3.5 text-[#c084fc] mb-0.5" />
+                        <span className="text-[10px] font-medium text-[#cbd5e1] truncate max-w-full">
+                          {def.shortName}
+                        </span>
+                        <span className="text-[9px] text-[#c084fc] whitespace-nowrap">Altar T2</span>
+                      </>
+                    ) : (
+                      <>
+                        <AerialGlyph kind={kind} color={col} className="w-5 h-5" />
+                        <span className="text-[10px] font-medium text-[#e2ebf5] truncate max-w-full leading-tight">
+                          + {def.shortName}
+                        </span>
+                        <span className="font-mono-tabular text-[10px] font-semibold text-[#f0b429]">
+                          {def.cost}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                );
+              })
+            )}
 
             <div className="h-11 w-px bg-[#d6bc86]/20 mx-0.5 shrink-0" />
 
@@ -1277,7 +1601,7 @@ export function GameHud({
               }}
               aria-disabled={hud.golemCount >= hud.maxGolems || hud.stormPower < hud.golemCost}
               {...tipProps('summon_golem')}
-              className={`flex flex-col items-center justify-center w-[66px] h-[56px] px-1 rounded-lg border transition-colors shrink-0 ${
+              className={`flex flex-col items-center justify-center w-[64px] h-[56px] px-1 rounded-lg border transition-colors shrink-0 ${
                 hud.golemCount >= hud.maxGolems || hud.stormPower < hud.golemCost
                   ? 'bg-[#111822] border-[#d6bc86]/15 opacity-50 cursor-not-allowed'
                   : 'bg-[#1a2636] border-[#f0b429]/45 hover:bg-[#243447] cursor-pointer'

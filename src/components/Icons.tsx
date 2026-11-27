@@ -1,6 +1,6 @@
 import React from 'react';
 import { TETROMINOES, rotateCells } from '../game/catalog';
-import type { BuildOptionKind, Direction, TetrominoKey } from '../game/types';
+import type { AerialUnitKind, BuildOptionKind, Direction, TetrominoKey } from '../game/types';
 
 export function AetherIslesTitleLockup({ className = '' }: { className?: string }) {
   return (
@@ -133,6 +133,48 @@ export function GolemGlyph({ className = 'w-4 h-4' }: { className?: string }) {
   );
 }
 
+export function PriestGlyph({
+  color = '#f0b429',
+  className = 'w-3.5 h-3.5',
+}: {
+  color?: string;
+  className?: string;
+}) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      {/* Subtle celestial halo arc */}
+      <path
+        d="M6.5 9.2 A6 6 0 0 1 17.5 9.2"
+        stroke="#F5DFAA"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeOpacity="0.85"
+      />
+      {/* Sculpted High Priest mitre crown */}
+      <path
+        d="M12 2.5 L16 8.2 L14.4 10.6 H9.6 L8 8.2 Z"
+        fill={color}
+        stroke="#FEF3C7"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      {/* Brow jewel */}
+      <circle cx="12" cy="7.2" r="1.1" fill="#FFFBEB" />
+      {/* Ceremonial hooded shoulders / mantle */}
+      <path
+        d="M5.5 21 C5.8 15.8 8.4 12.6 12 12.6 C15.6 12.6 18.2 15.8 18.5 21 Z"
+        fill={color}
+        fillOpacity="0.9"
+        stroke="#FEF3C7"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      {/* Gold stole trim */}
+      <path d="M12 12.8 V20.6" stroke="#FEF08A" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function StructureGlyph({
   kind,
   color,
@@ -232,6 +274,86 @@ export function StructureGlyph({
           <polygon points="12,4 15.5,21 8.5,21" fill="#3B2F52" stroke="#D6BC86" strokeWidth="1.2" />
           <circle cx="12" cy="5.5" r="3.4" fill="#FACC15" />
           <path d="M5 9 L9 7 M19 9 L15 7" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      );
+    case 'OUTPOST':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <polygon points="12,3 17,10 12,17 7,10" fill={color} stroke="#FEF3C7" strokeWidth="1.3" />
+          <ellipse cx="12" cy="10" rx="9" ry="3.2" stroke="#F5D061" strokeWidth="1.2" />
+          <path d="M6 20 L8 16 H16 L18 20 Z" fill="#94A3B8" stroke="#E2D8C5" strokeWidth="1" />
+        </svg>
+      );
+    case 'WATCHTOWER':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <path d="M9 21 L10 9 H14 L15 21 Z" fill="#CBD5E1" stroke="#64748B" strokeWidth="1" />
+          <path d="M7 9 H17" stroke="#EAB308" strokeWidth="2" strokeLinecap="round" />
+          <circle cx="12" cy="6" r="2.8" fill="#67E8F9" stroke="#FEF3C7" strokeWidth="1.1" />
+          <path d="M14.5 5.5 L20 3.5" stroke="#FDE047" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      );
+    case 'BARRIER_PYLON':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <path d="M8 21 L9.5 11 H14.5 L16 21 Z" fill="#94A3B8" />
+          <path d="M9.5 11 L7 5 M14.5 11 L17 5" stroke="#EAB308" strokeWidth="1.8" strokeLinecap="round" />
+          <circle cx="12" cy="7" r="2.6" fill="#38BDF8" stroke="#E0F2FE" strokeWidth="1.1" />
+          <path d="M3 7 H7 M17 7 H21" stroke="#38BDF8" strokeWidth="1.4" strokeDasharray="2 1.5" />
+        </svg>
+      );
+    case 'BRIDGE_MINE':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <ellipse cx="12" cy="14" rx="8" ry="4.5" fill="#7C2D12" stroke="#F59E0B" strokeWidth="1.4" />
+          <circle cx="12" cy="13" r="2.8" fill="#FB923C" />
+          <path d="M12 4 V8 M6 6 L8.5 9 M18 6 L15.5 9" stroke="#FDE047" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      );
+  }
+}
+
+export function AerialGlyph({
+  kind,
+  color,
+  className = 'w-5 h-5',
+}: {
+  kind: AerialUnitKind;
+  color: string;
+  className?: string;
+}) {
+  switch (kind) {
+    case 'SUN_FLYER':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <path d="M21 12 L7 5 L10 12 L7 19 Z" fill={color} stroke="#FEF3C7" strokeWidth="1.3" strokeLinejoin="round" />
+          <circle cx="13" cy="12" r="2" fill="#FEF08A" />
+        </svg>
+      );
+    case 'SKY_TRANSPORT':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <ellipse cx="12" cy="9" rx="8.5" ry="4.8" fill="#E8DEC8" stroke={color} strokeWidth="1.4" />
+          <rect x="9.5" y="4.5" width="5" height="9" fill={color} />
+          <path d="M9 14 L9.5 18 H14.5 L15 14" stroke="#EAB308" strokeWidth="1.3" />
+          <rect x="9" y="17.5" width="6" height="3" rx="0.8" fill="#78350F" stroke="#F5D061" strokeWidth="0.9" />
+        </svg>
+      );
+    case 'ROVING_WHIRLWIND':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <ellipse cx="12" cy="6" rx="7.5" ry="2.5" stroke={color} strokeWidth="1.8" />
+          <ellipse cx="12" cy="11.5" rx="5.5" ry="2" stroke="#F0FDFA" strokeWidth="1.6" />
+          <ellipse cx="12" cy="16.5" rx="3.4" ry="1.4" stroke={color} strokeWidth="1.5" />
+          <circle cx="12" cy="20" r="1.4" fill="#F0FDFA" />
+        </svg>
+      );
+    case 'SKY_LEVIATHAN':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+          <path d="M4 12 A8 7.5 0 0 1 20 12 Q12 16 4 12 Z" fill={color} stroke="#E0F2FE" strokeWidth="1.3" />
+          <path d="M8 14 V20 M12 14.5 V21.5 M16 14 V20" stroke="#7DD3FC" strokeWidth="1.6" strokeLinecap="round" />
+          <circle cx="12" cy="9" r="2.2" fill="#FEF08A" />
         </svg>
       );
   }

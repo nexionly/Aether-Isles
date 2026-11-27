@@ -6,6 +6,7 @@ import {
   STRUCTURE_CATALOG,
   TETROMINOES,
 } from './catalog';
+import { getDifficultyProfile } from './difficulty';
 import {
   canPlaceBridge,
   canPlaceStructure,
@@ -42,21 +43,20 @@ export class AiCommander {
   }
 
   public update(state: WorldState, dt: number, actions: AiCallbacks): void {
-    const cadence =
-      state.difficulty === 'STORMLORD' ? 1.65 : state.difficulty === 'ARCHON' ? 2.55 : 3.85;
-    const jitter =
-      state.difficulty === 'STORMLORD' ? 0.45 : state.difficulty === 'ARCHON' ? 0.55 : 0.7;
+    const profile = getDifficultyProfile(state.difficulty);
+    const cadence = profile.actionCadenceSeconds;
+    const jitter = profile.actionJitterSeconds;
 
     state.aiFactionIds.forEach((aiId, index) => {
       const faction = state.factions[aiId];
       if (!faction || faction.eliminated) return;
 
       if (this.thinkTimers[aiId] === undefined) {
-        // Give players breathing room at match start and stagger multi-rival AI frames
-        this.thinkTimers[aiId] = 2.4 + index * 0.55;
+        // Give players opening breathing room scaled by difficulty and stagger multi-rival AI frames
+        this.thinkTimers[aiId] = profile.openingGraceSeconds + index * 0.65;
       }
 
-      const remaining = (this.thinkTimers[aiId] ?? 2.4) - dt;
+      const remaining = (this.thinkTimers[aiId] ?? profile.openingGraceSeconds) - dt;
       if (remaining > 0) {
         this.thinkTimers[aiId] = remaining;
         return;
@@ -68,10 +68,10 @@ export class AiCommander {
   }
 
   private thinkForFaction(state: WorldState, aiId: AiFactionId, actions: AiCallbacks): void {
+    const profile = getDifficultyProfile(state.difficulty);
     const faction = state.factions[aiId];
     const aiGolems = state.golems.filter((g) => g.owner === aiId);
-    const desiredGolems =
-      state.difficulty === 'STORMLORD' ? 5 : state.difficulty === 'ARCHON' ? 4 : 3;
+    const desiredGolems = profile.desiredGolems;
 
     // 1. Keep economy moving with Golems
     if (aiGolems.length < desiredGolems && aiGolems.length < MAX_GOLEMS && faction.stormPower >= GOLEM_COST + 30) {
@@ -83,11 +83,11 @@ export class AiCommander {
       return;
     }
 
-    // If Aether Overload is enabled and well along on Archon/Sovereign, conserve reserves unless defending home
+    // If Aether Overload is enabled and difficulty permits hoarding, conserve reserves unless defending home
     const overloadTarget = state.victoryRules.aetherOverloadTarget || AETHER_OVERLOAD_TARGET;
     if (
       state.victoryRules.aetherOverload &&
-      state.difficulty !== 'INITIATE' &&
+      profile.overloadHoardEnabled &&
       faction.stormPower >= overloadTarget * 0.78
     ) {
       return;
@@ -95,7 +95,7 @@ export class AiCommander {
 
     // 3. Build an Aether Mill if sitting on surplus Aether
     const aiWindmills = state.structures.filter((s) => s.owner === aiId && s.kind === 'WINDMILL').length;
-    const maxWindmills = state.difficulty === 'STORMLORD' ? 4 : state.difficulty === 'ARCHON' ? 3 : 2;
+    const maxWindmills = profile.maxWindmills;
     if (aiWindmills < maxWindmills && faction.stormPower >= 145) {
       if (this.tryBuildEconomyStructure(state, aiId, actions)) return;
     }
@@ -319,6 +319,7 @@ export class AiCommander {
     // Sort urgent home threats first
     hostilePoints.sort((a, b) => b.priority - a.priority);
 
+    const homeDefenseCap = getDifficultyProfile(state.difficulty).homeDefenseTowerCap;
     let urgentThreat: { x: number; y: number } | null = null;
     for (const h of hostilePoints) {
       const nearbyAiTowers = state.structures.filter(
@@ -328,7 +329,7 @@ export class AiCommander {
           STRUCTURE_CATALOG[s.kind].fireRate > 0 &&
           Math.hypot(s.tx - h.x, s.ty - h.y) <= 7.5
       ).length;
-      if (nearbyAiTowers < (h.priority >= 3 ? 2 : 1)) {
+      if (nearbyAiTowers < (h.priority >= 3 ? homeDefenseCap : 1)) {
         const hasPoweredNear = this.findBestBuildTileNear(state, aiId, h.x, h.y, 7.5, true);
         if (hasPoweredNear) {
           urgentThreat = h;

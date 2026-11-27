@@ -11,6 +11,7 @@ import {
   Trophy,
 } from 'lucide-react';
 import { FURY_META } from '../game/catalog';
+import { getDifficultyProfile } from '../game/difficulty';
 import type { GamePhase, MatchStats } from '../game/types';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -27,9 +28,7 @@ interface ModalOverlaysProps {
 }
 
 function formatDifficulty(diff: MatchStats['difficulty']): string {
-  if (diff === 'STORMLORD') return 'Ascendant';
-  if (diff === 'ARCHON') return 'Archon';
-  return 'Acolyte';
+  return getDifficultyProfile(diff).label;
 }
 
 function formatDuration(seconds: number): string {
@@ -157,20 +156,49 @@ export function ModalOverlays({
           ? 'Your High Temple was shattered by rival siege fire.'
           : 'Your High Priest was captured and sacrificed by a rival archipelago.';
 
+  const isAetherVictory = isVictory && stats.outcomeReason === 'AETHER_OVERLOAD';
+  const isAltarRitualVictory =
+    isVictory &&
+    (stats.outcomeReason === 'PRIEST_SACRIFICE' || stats.outcomeReason === 'ALTAR_DOMINANCE');
+
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-[#08101c]/82 p-6">
+    <div
+      className={`fixed inset-0 z-30 flex items-center justify-center p-6 ${
+        isVictory ? 'bg-[#08101c]/44' : 'bg-[#08101c]/82'
+      }`}
+    >
       <div className="stone-frame rounded-xl w-full max-w-md p-7 space-y-6">
         <div className="text-center space-y-2">
-          <div className="mx-auto w-12 h-12 rounded-full flex items-center justify-center bg-[#1e2b3c] border border-[#d6bc86]/40">
+          <div
+            className={`mx-auto w-12 h-12 rounded-full flex items-center justify-center bg-[#1e2b3c] border ${
+              isAetherVictory
+                ? 'border-[#fde047]/70 shadow-[0_0_20px_rgba(240,180,41,0.45)]'
+                : isAltarRitualVictory
+                  ? 'border-[#c084fc]/70 shadow-[0_0_20px_rgba(192,132,252,0.45)]'
+                  : 'border-[#d6bc86]/40'
+            }`}
+          >
             {isVictory ? (
-              <Trophy className="w-6 h-6 text-[#f0b429]" />
+              <Trophy
+                className={`w-6 h-6 ${
+                  isAltarRitualVictory ? 'text-[#e879f9]' : 'text-[#f0b429]'
+                }`}
+              />
             ) : (
               <ShieldAlert className="w-6 h-6 text-[#f87171]" />
             )}
           </div>
           <h2
             className="font-display text-3xl font-bold"
-            style={{ color: isVictory ? '#f5dfaa' : '#fca5a5' }}
+            style={{
+              color: isAetherVictory
+                ? '#fde047'
+                : isAltarRitualVictory
+                  ? '#e9d5ff'
+                  : isVictory
+                    ? '#f5dfaa'
+                    : '#fca5a5',
+            }}
           >
             {headline}
           </h2>

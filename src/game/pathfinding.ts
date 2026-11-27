@@ -53,11 +53,18 @@ export function recomputePowerGrids(state: WorldState): void {
   const runBfs = (owner: FactionId) => {
     const faction = state.factions[owner];
     if (!faction || faction.eliminated) return;
-    const temple = state.structures.find((s) => s.kind === 'TEMPLE' && s.owner === owner);
-    if (!temple) return;
+    const hubs = state.structures.filter(
+      (s) => (s.kind === 'TEMPLE' || s.kind === 'OUTPOST') && s.owner === owner
+    );
+    if (hubs.length === 0) return;
     const bit = getFactionBit(owner);
-    const queue: Array<{ x: number; y: number }> = [{ x: temple.tx, y: temple.ty }];
-    state.tiles[temple.ty][temple.tx].poweredMask |= bit;
+    const queue: Array<{ x: number; y: number }> = [];
+    for (const hub of hubs) {
+      if ((state.tiles[hub.ty][hub.tx].poweredMask & bit) === 0) {
+        state.tiles[hub.ty][hub.tx].poweredMask |= bit;
+        queue.push({ x: hub.tx, y: hub.ty });
+      }
+    }
 
     let head = 0;
     while (head < queue.length) {
@@ -210,10 +217,10 @@ export function findTilePath(
   cameFrom.fill(-1);
   const closed = new Uint8Array(totalCells);
 
-  // Build quick occupancy set for structures (still allow walking on start/goal/temple/altar)
+  // Build quick occupancy set for structures (still allow walking on start/goal/temple/altar/mines)
   const blocked = new Uint8Array(totalCells);
   for (const s of state.structures) {
-    if (s.kind !== 'TEMPLE' && s.kind !== 'ALTAR') {
+    if (s.kind !== 'TEMPLE' && s.kind !== 'ALTAR' && s.kind !== 'BRIDGE_MINE') {
       blocked[key(s.tx, s.ty)] = 1;
     }
   }

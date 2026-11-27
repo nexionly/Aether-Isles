@@ -1,4 +1,6 @@
 import type {
+  AerialUnitDef,
+  AerialUnitKind,
   AiFactionId,
   Alignment,
   BuildOptionKind,
@@ -6,12 +8,18 @@ import type {
   FactionId,
   Fury,
   Owner,
+  PriestAbilityId,
   SpeedMultiplier,
   StructureDef,
   StructureKind,
+  TechUnlockKey,
+  TechUnlockOption,
   TetrominoKey,
   VictoryRules,
 } from './types';
+import windEmblemUrl from '../assets/images/fury_wind_emblem_1795699735323.jpg';
+import rainEmblemUrl from '../assets/images/fury_rain_emblem_1795699736142.jpg';
+import thunderEmblemUrl from '../assets/images/fury_thunder_emblem_1795699736997.jpg';
 
 export const GRID_SIZE = 50;
 export const TILE_W = 64;
@@ -19,6 +27,11 @@ export const TILE_H = 32;
 export const BRIDGE_TILE_HP = 95;
 export const MAX_GOLEMS = 6;
 export const GOLEM_COST = 65;
+export const MAX_AERIAL_UNITS = 4;
+export const RECLAIM_REFUND_RATE = 0.6;
+export const BRIDGE_DECAY_GRACE_SECONDS = 4.0;
+export const BRIDGE_DECAY_DPS = 12;
+export const ENERGY_FENCE_MAX_SPAN = 5;
 export const MAX_OPPONENTS = 6;
 export const SPEED_STEPS: readonly SpeedMultiplier[] = [1, 2, 3, 5];
 export const AETHER_OVERLOAD_TARGET = 2500;
@@ -33,6 +46,7 @@ export const DEFAULT_VICTORY_RULES: VictoryRules = {
   altarDominance: true,
   aetherOverload: true,
   aetherOverloadTarget: AETHER_OVERLOAD_TARGET,
+  fogOfWar: false,
 };
 
 export function loadVictoryRules(): VictoryRules {
@@ -60,6 +74,10 @@ export function loadVictoryRules(): VictoryRules {
           ? parsed.aetherOverload
           : DEFAULT_VICTORY_RULES.aetherOverload,
       aetherOverloadTarget: validTarget,
+      fogOfWar:
+        typeof parsed.fogOfWar === 'boolean'
+          ? parsed.fogOfWar
+          : DEFAULT_VICTORY_RULES.fogOfWar,
     };
   } catch {
     return { ...DEFAULT_VICTORY_RULES };
@@ -180,7 +198,7 @@ export const FURY_META: Record<
     tagline: 'Rapid gale ballistas, cyclone spires, and piercing lance volleys.',
     color: '#2dd4bf',
     accentSoft: 'rgba(45, 212, 191, 0.2)',
-    emblemSrc: '/src/assets/images/fury_wind_emblem_1795699735323.jpg',
+    emblemSrc: windEmblemUrl,
     tier2Unit: 'ZEPHYR_CANNON',
     units: ['WIND_CROSSBOW', 'WHIRLWIND_SPIRE', 'ZEPHYR_CANNON'],
   },
@@ -189,7 +207,7 @@ export const FURY_META: Record<
     tagline: 'Splash tidal mortars, glacial bulwarks, and regenerating leviathans.',
     color: '#38bdf8',
     accentSoft: 'rgba(56, 189, 248, 0.2)',
-    emblemSrc: '/src/assets/images/fury_rain_emblem_1795699736142.jpg',
+    emblemSrc: rainEmblemUrl,
     tier2Unit: 'MAN_O_WAR',
     units: ['RAIN_CANNON', 'FROST_BLOCKER', 'MAN_O_WAR'],
   },
@@ -198,13 +216,21 @@ export const FURY_META: Record<
     tagline: 'Bridge-shattering volt cannons, chain-spark pylons, and arc spires.',
     color: '#c084fc',
     accentSoft: 'rgba(192, 132, 252, 0.2)',
-    emblemSrc: '/src/assets/images/fury_thunder_emblem_1795699736997.jpg',
+    emblemSrc: thunderEmblemUrl,
     tier2Unit: 'ARC_SPIRE',
     units: ['THUNDER_CANNON', 'SPARK_PYLON', 'ARC_SPIRE'],
   },
 };
 
 export const SUN_UNITS: BuildOptionKind[] = ['SUN_DISC', 'STONE_BLOCKER', 'WINDMILL'];
+export const SUN_COMBAT_UNITS: BuildOptionKind[] = ['SUN_DISC', 'STONE_BLOCKER'];
+export const SUN_UTILITY_UNITS: BuildOptionKind[] = [
+  'WINDMILL',
+  'OUTPOST',
+  'WATCHTOWER',
+  'BARRIER_PYLON',
+  'BRIDGE_MINE',
+];
 
 export const ALIGNMENT_COLORS: Record<Alignment, string> = {
   SUN: '#f0b429',
@@ -315,6 +341,81 @@ export const STRUCTURE_CATALOG: Record<StructureKind, StructureDef> = {
     description: 'Harnesses high-altitude gusts for +4.5 Aether per second while connected to your Temple.',
     canBuildOnBridge: false,
     passiveIncome: 4.5,
+  },
+  OUTPOST: {
+    kind: 'OUTPOST',
+    name: 'Aether Relay',
+    shortName: 'Outpost',
+    alignment: 'SUN',
+    cost: 95,
+    maxHp: 340,
+    range: 0,
+    damage: 0,
+    fireRate: 0,
+    directional: false,
+    tier: 1,
+    role: 'ECONOMY',
+    description:
+      'Forward power hub built on solid land. Keeps its island and linked bridges powered even if your supply bridge back to Temple is cut.',
+    canBuildOnBridge: false,
+    isPowerHub: true,
+    visionRadius: 9.5,
+  },
+  WATCHTOWER: {
+    kind: 'WATCHTOWER',
+    name: 'Sky Observatory',
+    shortName: 'Watchtower',
+    alignment: 'SUN',
+    cost: 55,
+    maxHp: 145,
+    range: 0,
+    damage: 0,
+    fireRate: 0,
+    directional: false,
+    tier: 1,
+    role: 'DEFENSE',
+    description:
+      'Long-range crystal spire that pierces Fog of War across 14 tiles and spots incoming flyers and hidden bridge assaults.',
+    canBuildOnBridge: true,
+    visionRadius: 14,
+  },
+  BARRIER_PYLON: {
+    kind: 'BARRIER_PYLON',
+    name: 'Energy Fence Pylon',
+    shortName: 'Fence Pylon',
+    alignment: 'SUN',
+    cost: 45,
+    maxHp: 210,
+    range: 0,
+    damage: 0,
+    fireRate: 0,
+    directional: false,
+    tier: 1,
+    role: 'DEFENSE',
+    description:
+      'Place two pylons within 5 tiles along a straight row or column to project a crackling energy fence that blocks directional shots and zaps crossing enemies.',
+    canBuildOnBridge: true,
+    blocksDirectional: true,
+    isFencePylon: true,
+  },
+  BRIDGE_MINE: {
+    kind: 'BRIDGE_MINE',
+    name: 'Aether Mine',
+    shortName: 'Sky Mine',
+    alignment: 'SUN',
+    cost: 35,
+    maxHp: 60,
+    range: 1.6,
+    damage: 95,
+    fireRate: 0,
+    directional: false,
+    tier: 1,
+    role: 'DEFENSE',
+    description:
+      'Camouflaged bridge & island snare. Detonates when hostile Golems, Priests, or Flyers pass nearby, dealing heavy splash damage and cracking rival bridges.',
+    canBuildOnBridge: true,
+    splashRadius: 1.8,
+    isMine: true,
   },
 
   // WIND ASPECT
@@ -625,6 +726,234 @@ export function directionLabel(dir: Direction): string {
     case 3:
       return 'North-West';
   }
+}
+
+export const AERIAL_CATALOG: Record<AerialUnitKind, AerialUnitDef> = {
+  SUN_FLYER: {
+    kind: 'SUN_FLYER',
+    name: 'Solar Skiff',
+    shortName: 'Sun Flyer',
+    alignment: 'SUN',
+    cost: 95,
+    maxHp: 130,
+    speed: 3.4,
+    range: 5.8,
+    damage: 16,
+    fireRate: 1.15,
+    visionRadius: 10.5,
+    tier: 1,
+    description:
+      'Swift sky-glider that flies over open void without bridges. Click to scout Fog of War and raid exposed towers or Golems.',
+  },
+  SKY_TRANSPORT: {
+    kind: 'SKY_TRANSPORT',
+    name: 'Aether Dirigible',
+    shortName: 'Transport',
+    alignment: 'SUN',
+    cost: 110,
+    maxHp: 195,
+    speed: 2.85,
+    range: 0,
+    damage: 0,
+    fireRate: 0,
+    visionRadius: 10,
+    tier: 1,
+    canTransportPriest: true,
+    description:
+      'Airship that crosses open sky without bridges to snatch stunned enemy or Rogue Priests and airlift them straight to your Altar.',
+  },
+  ROVING_WHIRLWIND: {
+    kind: 'ROVING_WHIRLWIND',
+    name: 'Tempest Vortex',
+    shortName: 'Whirlwind',
+    alignment: 'WIND',
+    cost: 125,
+    maxHp: 210,
+    speed: 2.55,
+    range: 2.4,
+    damage: 24,
+    fireRate: 1.25,
+    visionRadius: 8,
+    tier: 2,
+    splashRadius: 2.4,
+    description:
+      'Wandering cyclone unleashed from your Temple. Roams across islands and bridges, shredding structures, bridges, and foes in its path.',
+  },
+  SKY_LEVIATHAN: {
+    kind: 'SKY_LEVIATHAN',
+    name: 'Sky Leviathan',
+    shortName: 'Sky Man-o-War',
+    alignment: 'RAIN',
+    cost: 140,
+    maxHp: 270,
+    speed: 2.2,
+    range: 6.2,
+    damage: 25,
+    fireRate: 1.0,
+    visionRadius: 9.5,
+    tier: 2,
+    regenPerSec: 10,
+    description:
+      'Floating bio-electric sky cruiser that drifts over open void, regenerates steadily, and lashes hostile towers and flyers.',
+  },
+};
+
+export const AERIAL_UNIT_ORDER: AerialUnitKind[] = [
+  'SUN_FLYER',
+  'SKY_TRANSPORT',
+  'ROVING_WHIRLWIND',
+  'SKY_LEVIATHAN',
+];
+
+export const PRIEST_ABILITY_CATALOG: Array<{
+  id: PriestAbilityId;
+  name: string;
+  hotkey: string;
+  cost: number;
+  maxCooldown: number;
+  description: string;
+}> = [
+  {
+    id: 'RECALL',
+    name: 'Temple Recall',
+    hotkey: 'Q',
+    cost: 25,
+    maxCooldown: 18,
+    description:
+      'Instantly teleport your High Priest back to your High Temple to escape danger (releases any captive).',
+  },
+  {
+    id: 'SANCTUARY',
+    name: 'Aegis Ward',
+    hotkey: 'E',
+    cost: 40,
+    maxCooldown: 24,
+    description:
+      'Wraps your High Priest in a 6s golden ward (-50% damage), restores +45 HP, and mends nearby allied structures & bridges.',
+  },
+  {
+    id: 'TEMPEST_CAST',
+    name: 'Aspect Surge',
+    hotkey: 'T',
+    cost: 55,
+    maxCooldown: 28,
+    description:
+      'Unleash a 4.8-tile burst of your chosen Aspect around your High Priest — Gale Nova (Wind), Glacial Deluge (Rain), or Chain Tempest (Thunder).',
+  },
+];
+
+export function isAerialUnitKind(key: TechUnlockKey): key is AerialUnitKind {
+  return (
+    key === 'SUN_FLYER' ||
+    key === 'SKY_TRANSPORT' ||
+    key === 'ROVING_WHIRLWIND' ||
+    key === 'SKY_LEVIATHAN'
+  );
+}
+
+export function getInitialUnlockedTechs(fury: Fury): TechUnlockKey[] {
+  const ownTier1 = FURY_META[fury].units.filter((u) => STRUCTURE_CATALOG[u].tier === 1);
+  return [
+    ...SUN_COMBAT_UNITS,
+    ...SUN_UTILITY_UNITS,
+    ...ownTier1,
+    'SUN_FLYER',
+    'SKY_TRANSPORT',
+  ];
+}
+
+export function getCombatPalette(fury: Fury, unlockedTechs: TechUnlockKey[]): BuildOptionKind[] {
+  const base: BuildOptionKind[] = [...SUN_COMBAT_UNITS, ...FURY_META[fury].units];
+  const extras: BuildOptionKind[] = [];
+  for (const key of unlockedTechs) {
+    if (isAerialUnitKind(key)) continue;
+    if (SUN_UTILITY_UNITS.includes(key)) continue;
+    if (!base.includes(key)) {
+      extras.push(key);
+    }
+  }
+  return [...base, ...extras];
+}
+
+export function buildTechUnlockChoices(
+  playerFury: Fury,
+  unlockedTechs: TechUnlockKey[],
+  stolenFury?: Fury
+): TechUnlockOption[] {
+  const unlockedSet = new Set<TechUnlockKey>(unlockedTechs);
+  const choices: TechUnlockOption[] = [];
+
+  const pushOption = (key: TechUnlockKey, badge: string) => {
+    if (unlockedSet.has(key) || choices.some((c) => c.key === key)) return;
+    if (isAerialUnitKind(key)) {
+      const def = AERIAL_CATALOG[key];
+      choices.push({
+        key,
+        isAerial: true,
+        name: def.name,
+        shortName: def.shortName,
+        alignment: def.alignment,
+        cost: def.cost,
+        description: def.description,
+        badge,
+      });
+    } else {
+      const def = STRUCTURE_CATALOG[key];
+      choices.push({
+        key,
+        isAerial: false,
+        name: def.name,
+        shortName: def.shortName,
+        alignment: def.alignment,
+        cost: def.cost,
+        description: def.description,
+        badge,
+      });
+    }
+  };
+
+  // 1. Own Aspect's signature Tier-2 structure first if not unlocked yet
+  const ownT2 = FURY_META[playerFury].tier2Unit;
+  if (!unlockedSet.has(ownT2)) {
+    pushOption(ownT2, `${FURY_META[playerFury].name.replace(' Aspect', '')} Tier 2`);
+  }
+
+  // 2. Stolen cross-aspect unit (prioritize sacrificed rival's Aspect if applicable)
+  const otherFuries: Fury[] = (['WIND', 'RAIN', 'THUNDER'] as Fury[]).filter((f) => f !== playerFury);
+  if (stolenFury && stolenFury !== playerFury) {
+    otherFuries.sort((a, b) => (a === stolenFury ? -1 : b === stolenFury ? 1 : 0));
+  }
+  for (const f of otherFuries) {
+    const candidates = FURY_META[f].units.filter((u) => !unlockedSet.has(u));
+    if (candidates.length > 0) {
+      const pick = candidates[0];
+      const fLabel = f === 'WIND' ? 'Wind' : f === 'RAIN' ? 'Rain' : 'Thunder';
+      pushOption(pick, `Cross-Aspect · ${fLabel}`);
+      if (choices.length >= 2) break;
+    }
+  }
+
+  // 3. Tier-2 Aerial Unit (Whirlwind or Sky Leviathan)
+  const aerialOrder: AerialUnitKind[] =
+    playerFury === 'RAIN'
+      ? ['SKY_LEVIATHAN', 'ROVING_WHIRLWIND']
+      : ['ROVING_WHIRLWIND', 'SKY_LEVIATHAN'];
+  for (const ak of aerialOrder) {
+    if (!unlockedSet.has(ak) && choices.length < 3) {
+      pushOption(ak, 'Aerial Mastery');
+    }
+  }
+
+  // Fill up to 3 options from any remaining locked cross-aspect structures
+  for (const f of otherFuries) {
+    for (const u of FURY_META[f].units) {
+      if (choices.length >= 3) break;
+      const fLabel = f === 'WIND' ? 'Wind' : f === 'RAIN' ? 'Rain' : 'Thunder';
+      pushOption(u, `Cross-Aspect · ${fLabel}`);
+    }
+  }
+
+  return choices.slice(0, 3);
 }
 
 export function getPaletteForFury(fury: Fury): BuildOptionKind[] {

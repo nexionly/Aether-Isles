@@ -1,4 +1,5 @@
 import {
+  AERIAL_CATALOG,
   AETHER_OVERLOAD_TARGET,
   AI_FACTION_PROFILES,
   ALIGNMENT_COLORS,
@@ -18,6 +19,7 @@ import {
 import { canPlaceBridge, canPlaceStructure, inBounds, isTilePoweredBy } from './pathfinding';
 import { getSpriteAtlas, type ProcessedStructureSprite, type SpriteAtlas } from './sprites';
 import type {
+  AerialUnit,
   CaptureExplosion,
   Crystal,
   Direction,
@@ -31,6 +33,9 @@ import type {
   RangeOverlayState,
   Structure,
   Tile,
+  VictoryCelebrationParticle,
+  VictoryCelebrationRing,
+  VictoryCelebrationState,
 } from './types';
 import { isoToTile, tileToIso, type WorldState } from './worldGen';
 
@@ -47,11 +52,12 @@ export interface RenderContextInfo {
   hoverTile: { tx: number; ty: number } | null;
   placement: PlacementMode;
   selectedId: number | null;
-  selectedKind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'GEYSER' | null;
+  selectedKind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'AERIAL' | 'GEYSER' | null;
   hoveredId: number | null;
-  hoveredKind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'GEYSER' | null;
+  hoveredKind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'AERIAL' | 'GEYSER' | null;
   rangeOverlay: RangeOverlayState;
   time: number;
+  victoryCelebration?: VictoryCelebrationState | null;
 }
 
 interface CloudInstance {
@@ -243,6 +249,19 @@ function getSunbeamCanvas(width: number, height: number): HTMLCanvasElement {
 function getOwnerColor(state: WorldState, owner: Owner | null): string {
   if (!owner || owner === 'NEUTRAL') return '#f0b429';
   return state.factions[owner]?.color ?? '#ef4444';
+}
+
+function getFogState(state: WorldState, tx: number, ty: number): number {
+  if (!state.victoryRules.fogOfWar) return 2;
+  const gs = state.gridSize;
+  const rx = Math.round(tx);
+  const ry = Math.round(ty);
+  if (rx < 0 || ry < 0 || rx >= gs || ry >= gs) return 0;
+  return state.fogGrid[ry * gs + rx] ?? 0;
+}
+
+function isTileFogVisible(state: WorldState, tx: number, ty: number): boolean {
+  return getFogState(state, tx, ty) >= 2;
 }
 
 function getPoweredAiVisual(
@@ -533,6 +552,10 @@ export function renderWorld(
   }
 
   for (const s of state.structures) {
+    if (s.owner !== 'PLAYER') {
+      if (s.kind === 'BRIDGE_MINE') continue;
+      if (!isTileFogVisible(state, s.tx, s.ty)) continue;
+    }
     const pos = tileToIso(s.tx, s.ty);
     if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
     const isSelected = info.selectedKind === 'STRUCTURE' && info.selectedId === s.id;
@@ -543,6 +566,7 @@ export function renderWorld(
   }
 
   for (const g of state.golems) {
+    if (g.owner !== 'PLAYER' && !isTileFogVisible(state, g.x, g.y)) continue;
     const pos = tileToIso(g.x, g.y);
     if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
     const isSelected = info.selectedKind === 'GOLEM' && info.selectedId === g.id;
@@ -554,6 +578,7 @@ export function renderWorld(
 
   for (const p of state.priests) {
     if (p.state === 'CARRIED' || p.state === 'SACRIFICED') continue;
+    if (p.owner !== 'PLAYER' && !isTileFogVisible(state, p.x, p.y)) continue;
     // Draw subtle dotted golden route for allied High Priest when marching to capture or returning to Altar
     if (p.owner === 'PLAYER' && p.state === 'ACTIVE' && p.targetPath.length > 0) {
       ctx.save();
@@ -583,8 +608,21 @@ export function renderWorld(
   renderables.sort((a, b) => a.depth - b.depth);
   for (const r of renderables) r.draw();
 
+  // 6b. Linked Barrier Pylon Energy Fences
+  drawEnergyFences(ctx, state, minIsoX, maxIsoX, minIsoY, maxIsoY, time);
+
+  // 6c. Airborne Sky Fleet Units (soaring over islands & void!)
+  for (const a of state.aerialUnits) {
+    if (a.owner !== 'PLAYER' && !isTileFogVisible(state, a.x, a.y)) continue;
+    const pos = tileToIso(a.x, a.y);
+    if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
+    const isSelected = info.selectedKind === 'AERIAL' && info.selectedId === a.id;
+    drawAerialUnit(ctx, atlas, state, a, pos.x, pos.y, time, isSelected);
+  }
+
   // 7. Projectiles, Lightning Arcs, Sacrifice Beams, Particles & Floating Text
   for (const proj of state.projectiles) {
+    if (proj.owner !== 'PLAYER' && !isTileFogVisible(state, proj.x, proj.y)) continue;
     drawProjectile(ctx, proj, time);
   }
 
@@ -606,6 +644,11 @@ export function renderWorld(
 
   // Dynamic celestial light shafts reacting to Aether Overload or Altar Dominance progress
   drawVictoryLightShafts(ctx, state, minIsoX, maxIsoX, minIsoY, maxIsoY, time);
+
+  // 7b. Optional Viewport-Culled Fog of War Cloud Shroud
+  if (state.victoryRules.fogOfWar) {
+    drawFogOfWarOverlay(ctx, state, minTx, maxTx, minTy, maxTy, minIsoX, maxIsoX, minIsoY, maxIsoY, time);
+  }
 
   for (const pt of state.particles) {
     if (!pt.active) continue;
@@ -637,6 +680,475 @@ export function renderWorld(
   // High-altitude wispy foreground clouds & drifting golden sunlit lantern motes
   drawParallaxClouds(ctx, atlas, time, camera, width, height, 2);
   drawAmbientSkyMotes(ctx, time, camera, width, height);
+
+  ctx.restore();
+
+  // 8. Screen-Space Victory Celebration Particle & Sigil Overlay (Aether Collection vs Altar Ritual)
+  if (info.victoryCelebration) {
+    drawVictoryCelebration(ctx, width, height, info.victoryCelebration, time);
+  }
+}
+
+function drawVictoryCelebration(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  cel: VictoryCelebrationState,
+  time: number
+): void {
+  const minDim = Math.min(width, height);
+  const fadeIn = Math.min(1, cel.elapsed / 0.45);
+  const cx = width * 0.5;
+  const cy = height * 0.5;
+
+  ctx.save();
+
+  // 1. Signature Ambient Backdrop Aura per Victory Type
+  if (cel.theme === 'AETHER_COLLECTION') {
+    // Rotating golden-amber prism sunburst rays behind the victory card
+    const rayCount = 12;
+    const outerR = Math.hypot(width, height) * 0.62;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(time * 0.09);
+    for (let i = 0; i < rayCount; i++) {
+      const a = (i / rayCount) * Math.PI * 2;
+      const spread = 0.085 + 0.02 * Math.sin(time * 1.6 + i);
+      ctx.fillStyle = i % 3 === 0 ? '#67e8f9' : '#fde047';
+      ctx.globalAlpha = (i % 2 === 0 ? 0.065 : 0.04) * fadeIn;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a - spread) * outerR, Math.sin(a - spread) * outerR);
+      ctx.lineTo(Math.cos(a + spread) * outerR, Math.sin(a + spread) * outerR);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Soft golden core bloom
+    ctx.globalAlpha = 0.14 * fadeIn;
+    ctx.fillStyle = '#f0b429';
+    ctx.beginPath();
+    ctx.arc(cx, cy, minDim * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (cel.theme === 'ALTAR_RITUAL') {
+    // Counter-rotating celestial Sanctuary Mandala framing the Altar Ritual victory
+    const mandalaR = minDim * 0.41;
+    const pulse = 0.85 + 0.15 * Math.sin(time * 2.1);
+
+    // Amethyst sanctuary glow halo
+    ctx.globalAlpha = 0.13 * fadeIn * pulse;
+    ctx.fillStyle = '#a855f7';
+    ctx.beginPath();
+    ctx.arc(cx, cy, mandalaR * 1.12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Outer rotating rune circle
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(time * 0.14);
+    ctx.strokeStyle = '#c084fc';
+    ctx.globalAlpha = 0.34 * fadeIn * pulse;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, mandalaR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#f0b429';
+    ctx.globalAlpha = 0.24 * fadeIn;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([10, 12]);
+    ctx.beginPath();
+    ctx.arc(0, 0, mandalaR * 1.07, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 12 carved ritual ticks & diamond nodes along outer ring
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      const inner = mandalaR * 0.93;
+      const outer = mandalaR * 1.04;
+      ctx.strokeStyle = i % 3 === 0 ? '#fde047' : '#e879f9';
+      ctx.globalAlpha = (i % 3 === 0 ? 0.55 : 0.32) * fadeIn;
+      ctx.lineWidth = i % 3 === 0 ? 2 : 1.3;
+      ctx.beginPath();
+      ctx.moveTo(cos * inner, sin * inner);
+      ctx.lineTo(cos * outer, sin * outer);
+      ctx.stroke();
+
+      if (i % 3 === 0) {
+        const dx = cos * mandalaR;
+        const dy = sin * mandalaR;
+        ctx.fillStyle = '#fef08a';
+        ctx.globalAlpha = 0.72 * fadeIn;
+        ctx.beginPath();
+        ctx.moveTo(dx, dy - 5);
+        ctx.lineTo(dx + 4, dy);
+        ctx.lineTo(dx, dy + 5);
+        ctx.lineTo(dx - 4, dy);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+
+    // Inner counter-rotating sacred 8-point altar star
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-time * 0.2);
+    const innerR = mandalaR * 0.84;
+    ctx.strokeStyle = '#f0b429';
+    ctx.globalAlpha = 0.26 * fadeIn * pulse;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    for (let s = 0; s < 2; s++) {
+      ctx.beginPath();
+      const offset = (s * Math.PI) / 4;
+      for (let k = 0; k < 4; k++) {
+        const a = offset + (k * Math.PI) / 2;
+        const px = Math.cos(a) * innerR;
+        const py = Math.sin(a) * innerR;
+        if (k === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = s === 0 ? '#c084fc' : '#f0b429';
+      ctx.globalAlpha = 0.2 * fadeIn;
+      ctx.stroke();
+    }
+    ctx.restore();
+  } else {
+    // Temple Siege warm triumph corona
+    ctx.globalAlpha = 0.11 * fadeIn;
+    ctx.fillStyle = cel.primaryColor;
+    ctx.beginPath();
+    ctx.arc(cx, cy, minDim * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 2. Expanding Thematic Resonance Rings
+  for (const ring of cel.rings) {
+    drawVictoryRing(ctx, width, height, minDim, ring);
+  }
+
+  // 3. Celebratory Particles (Faceted Aether Crystals, Ritual Wisps & Runes, Starlight Fireworks)
+  for (const pt of cel.particles) {
+    drawVictoryParticle(ctx, width, height, pt, cel.elapsed);
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawVictoryRing(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  minDim: number,
+  ring: VictoryCelebrationRing
+): void {
+  const ease = 1 - Math.pow(1 - ring.progress, 3);
+  const fade = Math.max(0, 1 - ring.progress);
+  const radius = Math.max(8, ring.maxRadius * minDim * ease);
+  const x = ring.nx * width;
+  const y = ring.ny * height;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ring.rotation);
+
+  if (ring.style === 'CRYSTAL_PRISM') {
+    // Rotating faceted diamond/octagonal Aether prism wave
+    const drawOctagon = (r: number) => {
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        const rr = i % 2 === 0 ? r : r * 0.88;
+        const px = Math.cos(a) * rr;
+        const py = Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    };
+
+    ctx.strokeStyle = ring.color;
+    ctx.globalAlpha = 0.72 * fade;
+    ctx.lineWidth = 2.6 * fade + 0.8;
+    drawOctagon(radius);
+    ctx.stroke();
+
+    ctx.strokeStyle = ring.secondaryColor;
+    ctx.globalAlpha = 0.48 * fade;
+    ctx.lineWidth = 1.4;
+    drawOctagon(radius * 0.82);
+    ctx.stroke();
+
+    // 4 sparkling crystal nodes at major vertices
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.85 * fade;
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const vx = Math.cos(a) * radius;
+      const vy = Math.sin(a) * radius;
+      const s = 4.2 * fade + 1.2;
+      ctx.beginPath();
+      ctx.moveTo(vx, vy - s);
+      ctx.lineTo(vx + s * 0.65, vy);
+      ctx.lineTo(vx, vy + s);
+      ctx.lineTo(vx - s * 0.65, vy);
+      ctx.closePath();
+      ctx.fill();
+    }
+  } else if (ring.style === 'RITUAL_SIGIL') {
+    // Double sacred altar circle with 6 orbiting rune orbs
+    ctx.strokeStyle = ring.color;
+    ctx.globalAlpha = 0.68 * fade;
+    ctx.lineWidth = 2.2 * fade + 0.8;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = ring.secondaryColor;
+    ctx.globalAlpha = 0.52 * fade;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([7, 7]);
+    ctx.beginPath();
+    ctx.arc(0, 0, radius * 0.78, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const ox = Math.cos(a) * radius;
+      const oy = Math.sin(a) * radius;
+      ctx.fillStyle = i % 2 === 0 ? ring.secondaryColor : '#ffffff';
+      ctx.globalAlpha = 0.82 * fade;
+      ctx.beginPath();
+      ctx.arc(ox, oy, 2.8 * fade + 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    // Siege firework starburst ring
+    ctx.strokeStyle = ring.color;
+    ctx.globalAlpha = 0.62 * fade;
+    ctx.lineWidth = 2.4 * fade + 0.6;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = ring.secondaryColor;
+    ctx.globalAlpha = 0.42 * fade;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius * 0.72, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawVictoryParticle(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  pt: VictoryCelebrationParticle,
+  elapsed: number
+): void {
+  const lifeRatio = Math.max(0, Math.min(1, pt.life / pt.maxLife));
+  // Smooth fade-in and graceful fade-out
+  const alphaEnv = Math.min(1, (1 - lifeRatio) * 6) * Math.min(1, lifeRatio * 2.2);
+  const twinkle = 0.72 + 0.28 * Math.sin(elapsed * pt.twinkleSpeed + pt.swayPhase);
+  const alpha = alphaEnv * twinkle;
+  if (alpha <= 0.01) return;
+
+  const x = pt.nx * width;
+  const y = pt.ny * height;
+  const s = pt.size * (0.62 + 0.38 * Math.min(1, lifeRatio * 1.6));
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  if (pt.shape === 'CRYSTAL') {
+    // Faceted 3D-style Aether Crystal Shard with bright specular left facet
+    ctx.rotate(pt.rotation);
+
+    // Subtle outer golden/cyan aura halo
+    ctx.fillStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.24;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 1.45, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Full elongated diamond crystal silhouette
+    ctx.globalAlpha = alpha * 0.94;
+    ctx.fillStyle = pt.color;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 1.35);
+    ctx.lineTo(s * 0.72, -s * 0.12);
+    ctx.lineTo(0, s * 1.25);
+    ctx.lineTo(-s * 0.72, -s * 0.12);
+    ctx.closePath();
+    ctx.fill();
+
+    // Bright upper-left specular facet
+    ctx.fillStyle = pt.coreColor;
+    ctx.globalAlpha = alpha * 0.78;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 1.35);
+    ctx.lineTo(0, -s * 0.05);
+    ctx.lineTo(-s * 0.72, -s * 0.12);
+    ctx.closePath();
+    ctx.fill();
+
+    // Crisp rim highlight
+    ctx.strokeStyle = '#ffffff';
+    ctx.globalAlpha = alpha * 0.55;
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 1.35);
+    ctx.lineTo(s * 0.72, -s * 0.12);
+    ctx.lineTo(0, s * 1.25);
+    ctx.lineTo(-s * 0.72, -s * 0.12);
+    ctx.closePath();
+    ctx.stroke();
+  } else if (pt.shape === 'WISP') {
+    // Ascending ethereal ceremonial altar flame / spirit wisp
+    const tilt = Math.max(-0.35, Math.min(0.35, pt.vx * 2.2));
+    ctx.rotate(tilt);
+
+    // Soft outer violet/gold aura
+    ctx.fillStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.26;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 1.65, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Teardrop flame body pointing upward
+    ctx.fillStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.88;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 1.45);
+    ctx.quadraticCurveTo(s * 0.85, -s * 0.1, 0, s * 0.95);
+    ctx.quadraticCurveTo(-s * 0.85, -s * 0.1, 0, -s * 1.45);
+    ctx.closePath();
+    ctx.fill();
+
+    // Luminous inner soul core
+    ctx.fillStyle = pt.coreColor;
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.beginPath();
+    ctx.arc(0, s * 0.12, s * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (pt.shape === 'RUNE') {
+    // Floating carved Altar Ritual rune sigil
+    ctx.rotate(pt.rotation);
+
+    ctx.fillStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.18;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 1.35, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.92;
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    const r = s * 0.85;
+    ctx.beginPath();
+    if (pt.runeVariant === 0) {
+      // Sacred diamond & vertical pillar
+      ctx.moveTo(0, -r * 1.2);
+      ctx.lineTo(0, r * 1.2);
+      ctx.moveTo(0, -r * 0.72);
+      ctx.lineTo(r * 0.68, 0);
+      ctx.lineTo(0, r * 0.72);
+      ctx.lineTo(-r * 0.68, 0);
+      ctx.closePath();
+    } else if (pt.runeVariant === 1) {
+      // Altar chalice / crescent sigil
+      ctx.moveTo(-r * 0.72, -r * 0.75);
+      ctx.lineTo(0, 0);
+      ctx.lineTo(r * 0.72, -r * 0.75);
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, r * 1.05);
+      ctx.moveTo(-r * 0.5, r * 0.55);
+      ctx.lineTo(r * 0.5, r * 0.55);
+    } else if (pt.runeVariant === 2) {
+      // Double ascending chevron
+      ctx.moveTo(-r * 0.7, r * 0.15);
+      ctx.lineTo(0, -r * 0.85);
+      ctx.lineTo(r * 0.7, r * 0.15);
+      ctx.moveTo(-r * 0.5, r * 0.85);
+      ctx.lineTo(0, r * 0.05);
+      ctx.lineTo(r * 0.5, r * 0.85);
+    } else {
+      // Sanctuary starburst cross
+      ctx.moveTo(0, -r);
+      ctx.lineTo(0, r);
+      ctx.moveTo(-r * 0.75, 0);
+      ctx.lineTo(r * 0.75, 0);
+      ctx.moveTo(-r * 0.45, -r * 0.45);
+      ctx.lineTo(r * 0.45, r * 0.45);
+    }
+    ctx.stroke();
+
+    // Glowing gold core dot
+    ctx.fillStyle = pt.coreColor;
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.beginPath();
+    ctx.arc(0, 0, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (pt.shape === 'STAR') {
+    // 4-point celestial sparkle star
+    ctx.rotate(pt.rotation);
+    ctx.fillStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.95;
+    const outer = s * 1.3;
+    const inner = s * 0.28;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const rad = i % 2 === 0 ? outer : inner;
+      const px = Math.cos(a) * rad;
+      const py = Math.sin(a) * rad;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Streaking energy spark with velocity tail
+    const tailX = -pt.vx * width * 0.032;
+    const tailY = -pt.vy * height * 0.032;
+    ctx.strokeStyle = pt.color;
+    ctx.globalAlpha = alpha * 0.72;
+    ctx.lineWidth = Math.max(1.4, s * 0.52);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(tailX, tailY);
+    ctx.stroke();
+
+    ctx.fillStyle = pt.coreColor;
+    ctx.globalAlpha = alpha * 0.95;
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(1.6, s * 0.45), 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   ctx.restore();
 }
@@ -1341,6 +1853,18 @@ function drawBridgeTile(
   ctx.lineWidth = 1;
   ctx.stroke();
 
+  // Severed Bridge Decay Warning (pulsing amber/crimson fissure when unpowered!)
+  if (tile.unpoweredSeconds > 1.2) {
+    const decayPulse = 0.45 + 0.45 * Math.sin(time * 7.5 + tile.x + tile.y);
+    ctx.save();
+    drawIsoDiamond(ctx, cx, cy, TILE_W - 6, TILE_H - 3);
+    ctx.strokeStyle = tile.unpoweredSeconds > 3.5 ? '#ef4444' : '#f59e0b';
+    ctx.globalAlpha = decayPulse * 0.85;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Cracks & HP bar when damaged
   if (tile.hp < tile.maxHp) {
     ctx.strokeStyle = '#18181b';
@@ -1536,6 +2060,14 @@ function getBuildPreviewSprite(
       const dir = getDirectionalTowerSprite(atlas, 'THUNDER_CANNON', facing);
       return { sprite: dir.sprite, width: 78, flipX: dir.flipX };
     }
+    case 'OUTPOST':
+      return { sprite: atlas.structures.aetherRelay, width: 82, flipX: false };
+    case 'WATCHTOWER':
+      return { sprite: atlas.structures.skyObservatory, width: 78, flipX: false };
+    case 'BARRIER_PYLON':
+      return { sprite: atlas.structures.fencePylon, width: 74, flipX: false };
+    case 'BRIDGE_MINE':
+      return { sprite: atlas.structures.aetherMine, width: 42, flipX: false };
     case 'SPARK_PYLON':
       return { sprite: atlas.structures.spire, width: 60, flipX: false };
     case 'ARC_SPIRE':
@@ -1585,7 +2117,7 @@ function drawPlacementOverlay(
     const def = STRUCTURE_CATALOG[placement.kind];
     const check = canPlaceStructure(state, 'PLAYER', hoverTile.tx, hoverTile.ty, def.canBuildOnBridge);
     const canAfford = state.factions.PLAYER.stormPower >= def.cost;
-    const unlocked = def.tier <= state.factions.PLAYER.knowledgeTier;
+    const unlocked = state.factions.PLAYER.unlockedTechs.includes(placement.kind);
     const ok = check.valid && canAfford && unlocked;
 
     const pos = tileToIso(hoverTile.tx, hoverTile.ty);
@@ -1602,6 +2134,31 @@ function drawPlacementOverlay(
       } else {
         drawIsoRangeEllipse(ctx, pos.x, pos.y, def.range, ok ? playerColor : '#f87171');
       }
+    } else if (placement.kind === 'WATCHTOWER' && def.visionRadius) {
+      drawIsoRangeEllipse(ctx, pos.x, pos.y, def.visionRadius, ok ? '#38bdf8' : '#f87171');
+    }
+
+    // Preview prospective Energy Fence links when hovering a Barrier Pylon placement
+    if (placement.kind === 'BARRIER_PYLON' && ok) {
+      for (const existing of state.structures) {
+        if (existing.owner !== 'PLAYER' || existing.kind !== 'BARRIER_PYLON' || !existing.powered) continue;
+        const sameCol = existing.tx === hoverTile.tx;
+        const sameRow = existing.ty === hoverTile.ty;
+        if (!sameCol && !sameRow) continue;
+        const span = Math.abs(existing.tx - hoverTile.tx) + Math.abs(existing.ty - hoverTile.ty);
+        if (span < 2 || span > 5) continue;
+        const otherPos = tileToIso(existing.tx, existing.ty);
+        ctx.save();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.globalAlpha = 0.72;
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y - 46);
+        ctx.lineTo(otherPos.x, otherPos.y - 46);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Translucent bespoke sprite preview of the tower being placed (with true 4-way facing)
@@ -1609,17 +2166,18 @@ function drawPlacementOverlay(
     if (preview && preview.sprite.ready) {
       ctx.save();
       ctx.translate(pos.x, pos.y);
-      ctx.globalAlpha = ok ? 0.72 : 0.36;
+      ctx.globalAlpha = ok ? 0.74 : 0.36;
       if (def.directional) {
         drawDirectionalAimChevron(ctx, placement.facing, ok ? ALIGNMENT_COLORS[def.alignment] : '#f87171', true, time);
       }
-      drawBespokeSprite(ctx, preview.sprite, preview.width, 17, false, false, preview.flipX);
+      const bottomY = placement.kind === 'BRIDGE_MINE' ? 10 : 17;
+      drawBespokeSprite(ctx, preview.sprite, preview.width, bottomY, false, false, preview.flipX);
       ctx.restore();
     }
 
     if (!ok) {
       const reason = !unlocked
-        ? 'Sacrifice a Rogue Priest to unlock'
+        ? 'Unlock via Altar Knowledge Sacrifice'
         : !canAfford
           ? `Need ${def.cost} AE`
           : check.reason ?? 'Cannot build here';
@@ -1754,6 +2312,8 @@ function drawSelectedRangeOverlay(
       }
     } else if (def.slowAuraRadius && def.slowAuraRadius > 0) {
       drawIsoRangeEllipse(ctx, pos.x, pos.y, def.slowAuraRadius, '#38bdf8');
+    } else if (s.kind === 'WATCHTOWER' && def.visionRadius) {
+      drawIsoRangeEllipse(ctx, pos.x, pos.y, def.visionRadius, '#67e8f9');
     }
   };
 
@@ -1762,12 +2322,50 @@ function drawSelectedRangeOverlay(
     if (s) drawRangeForStructure(s, false);
   }
 
+  if (info.selectedKind === 'AERIAL' && info.selectedId !== null) {
+    const a = state.aerialUnits.find((u) => u.id === info.selectedId);
+    if (a) {
+      const def = AERIAL_CATALOG[a.kind];
+      const pos = tileToIso(a.x, a.y);
+      const col = a.owner === 'PLAYER' ? playerColor : getOwnerColor(state, a.owner);
+      if (def.range > 0) {
+        drawIsoRangeEllipse(ctx, pos.x, pos.y, def.range, col);
+      }
+      // Waypoint flight tether
+      if (a.owner === 'PLAYER' && Math.hypot(a.targetX - a.x, a.targetY - a.y) > 0.4) {
+        const dst = tileToIso(a.targetX, a.targetY);
+        ctx.save();
+        ctx.strokeStyle = '#67e8f9';
+        ctx.globalAlpha = 0.65;
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y - 30);
+        ctx.lineTo(dst.x, dst.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.ellipse(dst.x, dst.y, 12, 6, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
   // Also preview hovered entity highlight & attack/aura range when not overlapping active structure placement
   if (info.hoveredKind !== null && info.hoveredId !== null) {
     const sameAsSelected = info.hoveredKind === info.selectedKind && info.hoveredId === info.selectedId;
     if (info.hoveredKind === 'STRUCTURE' && !sameAsSelected && info.placement.type !== 'STRUCTURE') {
       const s = state.structures.find((st) => st.id === info.hoveredId);
       if (s) drawRangeForStructure(s, true);
+    } else if (info.hoveredKind === 'AERIAL' && !sameAsSelected) {
+      const a = state.aerialUnits.find((u) => u.id === info.hoveredId);
+      if (a) {
+        const def = AERIAL_CATALOG[a.kind];
+        const pos = tileToIso(a.x, a.y);
+        const col = a.owner === 'PLAYER' ? playerColor : getOwnerColor(state, a.owner);
+        if (def.range > 0) drawIsoRangeEllipse(ctx, pos.x, pos.y, def.range, col);
+      }
     } else if (info.hoveredKind === 'PRIEST' && !sameAsSelected) {
       const p = state.priests.find((pr) => pr.id === info.hoveredId);
       if (p) {
@@ -2827,11 +3425,141 @@ function drawStructure(
       }
       break;
     }
+
+    case 'OUTPOST': {
+      if (drawBespokeSprite(ctx, atlas.structures.aetherRelay, 82, 17, flash, !s.powered)) {
+        if (s.powered) {
+          const pulse = 0.8 + 0.2 * Math.sin(time * 3.6 + s.animPhase);
+          const relayGlow = ctx.createRadialGradient(0, -34, 2, 0, -34, 20 * pulse);
+          relayGlow.addColorStop(0, 'rgba(255, 250, 205, 0.74)');
+          relayGlow.addColorStop(0.5, 'rgba(245, 184, 50, 0.28)');
+          relayGlow.addColorStop(1, 'rgba(245, 184, 50, 0)');
+          ctx.fillStyle = relayGlow;
+          ctx.beginPath();
+          ctx.arc(0, -34, 20 * pulse, 0, Math.PI * 2);
+          ctx.fill();
+
+          for (let m = 0; m < 3; m++) {
+            const mp = (time * 0.68 + m * 0.33 + s.animPhase) % 1;
+            const mx = Math.sin(time * 2.5 + m * 2.2) * 11;
+            const my = -24 - mp * 32;
+            ctx.fillStyle = `rgba(254, 249, 195, ${((1 - mp) * 0.85).toFixed(2)})`;
+            ctx.beginPath();
+            ctx.arc(mx, my, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        drawFactionPennant(ctx, 22, -38, teamCol, time, s.animPhase);
+      } else {
+        drawIsoBox(ctx, 0, -4, 34, 17, 10, flash ? '#ffffff' : '#ede4d0', '#c7baa0', '#8d887e', '#4c453b');
+        drawCrystalSpire(ctx, 0, -24 + Math.sin(time * 2.8 + s.animPhase) * 2.5, 7, 18, 0);
+      }
+      break;
+    }
+
+    case 'WATCHTOWER': {
+      if (drawBespokeSprite(ctx, atlas.structures.skyObservatory, 78, 17, flash, !s.powered)) {
+        if (s.powered) {
+          const pulse = 0.78 + 0.22 * Math.sin(time * 3.2 + s.animPhase);
+          const lensGlow = ctx.createRadialGradient(0, -52, 1.5, 0, -52, 15 * pulse);
+          lensGlow.addColorStop(0, 'rgba(224, 242, 254, 0.75)');
+          lensGlow.addColorStop(0.55, 'rgba(56, 189, 248, 0.28)');
+          lensGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          ctx.fillStyle = lensGlow;
+          ctx.beginPath();
+          ctx.arc(0, -52, 15 * pulse, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Gentle sweeping horizon glint from the sapphire spyglass lens
+          const sweep = time * 1.1 + s.animPhase;
+          ctx.save();
+          ctx.translate(0, -52);
+          ctx.rotate(sweep);
+          const beamGrad = ctx.createLinearGradient(0, 0, 26, 0);
+          beamGrad.addColorStop(0, 'rgba(186, 230, 253, 0.42)');
+          beamGrad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          ctx.fillStyle = beamGrad;
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(26, -5);
+          ctx.lineTo(26, 5);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+        drawFactionPennant(ctx, 16, -42, teamCol, time, s.animPhase);
+      } else {
+        drawIsoBox(ctx, 0, -4, 24, 12, 28, flash ? '#ffffff' : '#dfd4be', '#b8a88e', '#747a87', '#3f382e');
+      }
+      break;
+    }
+
+    case 'BARRIER_PYLON': {
+      if (drawBespokeSprite(ctx, atlas.structures.fencePylon, 74, 17, flash, !s.powered)) {
+        if (s.powered) {
+          const hum = 0.78 + 0.22 * Math.sin(time * 7.2 + s.animPhase);
+          const orbGlow = ctx.createRadialGradient(0, -52, 1.5, 0, -52, 16 * hum);
+          orbGlow.addColorStop(0, 'rgba(240, 253, 255, 0.78)');
+          orbGlow.addColorStop(0.5, 'rgba(56, 189, 248, 0.34)');
+          orbGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          ctx.fillStyle = orbGlow;
+          ctx.beginPath();
+          ctx.arc(0, -52, 16 * hum, 0, Math.PI * 2);
+          ctx.fill();
+
+          for (let k = 0; k < 2; k++) {
+            const ang = time * 4.8 + s.animPhase + k * Math.PI;
+            ctx.fillStyle = '#e0f2fe';
+            ctx.beginPath();
+            ctx.arc(Math.cos(ang) * 9.5, -52 + Math.sin(ang) * 4.5, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      } else {
+        drawIsoBox(ctx, 0, -4, 24, 12, 20, flash ? '#ffffff' : '#94a3b8', '#64748b', '#475569', '#1e293b');
+      }
+      break;
+    }
+
+    case 'BRIDGE_MINE': {
+      const pulse = 0.65 + 0.35 * Math.sin(time * 5.2 + s.animPhase);
+      if (drawBespokeSprite(ctx, atlas.structures.aetherMine, 42, 10, flash, false)) {
+        // Warm pulsing fiery-amber crystal glint at the recessed trigger core
+        const coreGlow = ctx.createRadialGradient(0, -5, 1, 0, -5, 10 * pulse);
+        coreGlow.addColorStop(0, 'rgba(254, 240, 138, 0.78)');
+        coreGlow.addColorStop(0.55, 'rgba(249, 115, 22, 0.32)');
+        coreGlow.addColorStop(1, 'rgba(249, 115, 22, 0)');
+        ctx.fillStyle = coreGlow;
+        ctx.beginPath();
+        ctx.arc(0, -5, 10 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Subtle dashed armed perimeter ring visible to owner
+        ctx.strokeStyle = '#fb923c';
+        ctx.globalAlpha = 0.42 * pulse;
+        ctx.lineWidth = 1.1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 19, 9.5, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillStyle = '#452b1f';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 12.5, 6.2, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+      break;
+    }
   }
 
   // Progressive Damage Weathering: stone cracks, rising smoke & flickering fire embers
   const hpRatio = s.hp / Math.max(1, s.maxHp);
-  if (hpRatio < 0.65 && s.buildProgress >= 0.99) {
+  if (hpRatio < 0.65 && s.buildProgress >= 0.99 && s.kind !== 'BRIDGE_MINE') {
     const severity = Math.min(1, (0.65 - hpRatio) / 0.55);
     ctx.save();
     // Fracture cracks across the facade
@@ -2876,8 +3604,8 @@ function drawStructure(
     ctx.restore();
   }
 
-  // Unpowered Warning Seal
-  if (!s.powered && s.owner !== 'NEUTRAL') {
+  // Unpowered Warning Seal (not shown on self-armed Bridge Mines)
+  if (!s.powered && s.owner !== 'NEUTRAL' && s.kind !== 'BRIDGE_MINE') {
     ctx.fillStyle = 'rgba(15, 23, 36, 0.94)';
     ctx.beginPath();
     ctx.arc(0, -44, 8.5, 0, Math.PI * 2);
@@ -3156,9 +3884,36 @@ function drawGolem(
     drawCrystalSpire(ctx, 0, cy, 6.8, 17, 0.35);
   }
 
+  // Golem hauling a Captured Priest orb overhead!
+  if (g.carryingPriestId !== null) {
+    const py = -44 - bounce + Math.sin(time * 4.2 + g.id) * 2;
+    ctx.fillStyle = 'rgba(192, 132, 252, 0.32)';
+    ctx.beginPath();
+    ctx.arc(0, py, 13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fde047';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, py, 8.5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#fef08a';
+    ctx.beginPath();
+    ctx.arc(0, py, 4.2, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (g.task === 'REPAIRING') {
+    // Subtle golden repair wrench/spark aura when mending structures/bridges
+    ctx.strokeStyle = '#fde047';
+    ctx.globalAlpha = 0.65 + 0.3 * Math.sin(time * 8 + g.id);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, -18 - bounce, 14, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
   if (g.hp < g.maxHp) {
     const ratio = Math.max(0, g.hp / g.maxHp);
-    const barY = g.carryingCrystalValue > 0 ? -62 : -47;
+    const barY = g.carryingCrystalValue > 0 || g.carryingPriestId !== null ? -62 : -47;
     ctx.fillStyle = 'rgba(10, 16, 26, 0.88)';
     ctx.beginPath();
     ctx.roundRect(-14, barY, 28, 4.5, 2);
@@ -3219,6 +3974,30 @@ function drawPriest(
         ctx.fill();
       }
     }
+    ctx.restore();
+  }
+
+  // Active Sanctuary Aegis Ward Shield Dome
+  if (p.shieldTimer > 0 && p.state === 'ACTIVE') {
+    const sp = 0.72 + 0.28 * Math.sin(time * 6.5);
+    ctx.save();
+    ctx.fillStyle = 'rgba(253, 224, 71, 0.14)';
+    ctx.strokeStyle = '#fde047';
+    ctx.globalAlpha = 0.8 * sp;
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.arc(0, -24 - hover, 22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = '#67e8f9';
+    ctx.globalAlpha = 0.55 * sp;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.arc(0, -24 - hover, 25, time * 1.5, time * 1.5 + Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.restore();
   }
 
@@ -4225,6 +5004,356 @@ function directionIsoVector(facing: Direction): { x: number; y: number } {
   return { x: v.x / len, y: v.y / len };
 }
 
+function drawEnergyFences(
+  ctx: CanvasRenderingContext2D,
+  state: WorldState,
+  minIsoX: number,
+  maxIsoX: number,
+  minIsoY: number,
+  maxIsoY: number,
+  time: number
+): void {
+  if (state.energyFences.length === 0) return;
+  for (const fence of state.energyFences) {
+    if (!fence.active) continue;
+    if (
+      fence.owner !== 'PLAYER' &&
+      !isTileFogVisible(state, fence.ax, fence.ay) &&
+      !isTileFogVisible(state, fence.bx, fence.by)
+    ) {
+      continue;
+    }
+    const a = tileToIso(fence.ax, fence.ay);
+    const b = tileToIso(fence.bx, fence.by);
+    if (
+      Math.max(a.x, b.x) < minIsoX ||
+      Math.min(a.x, b.x) > maxIsoX ||
+      Math.max(a.y, b.y) < minIsoY ||
+      Math.min(a.y, b.y) > maxIsoY
+    ) {
+      continue;
+    }
+    const teamCol = getOwnerColor(state, fence.owner);
+    const pulse = 0.72 + 0.28 * Math.sin(time * 9 + fence.pylonAId);
+
+    ctx.save();
+    // Translucent barrier ribbon aligned with the Fence Pylon conductor orbs
+    const ribGrad = ctx.createLinearGradient(a.x, a.y - 52, a.x, a.y - 10);
+    ribGrad.addColorStop(0, 'rgba(56, 189, 248, 0.28)');
+    ribGrad.addColorStop(0.55, `${teamCol}28`);
+    ribGrad.addColorStop(1, 'rgba(56, 189, 248, 0.06)');
+    ctx.fillStyle = ribGrad;
+    ctx.globalAlpha = 0.92 * pulse;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y - 52);
+    ctx.lineTo(b.x, b.y - 52);
+    ctx.lineTo(b.x, b.y - 12);
+    ctx.lineTo(a.x, a.y - 12);
+    ctx.closePath();
+    ctx.fill();
+
+    // Dual crackling Aether energy rails spanning pylon-to-pylon
+    const midX = (a.x + b.x) * 0.5;
+    const midY = (a.y + b.y) * 0.5;
+    const wave = Math.sin(time * 13 + fence.pylonAId * 1.7) * 2.6;
+
+    ctx.strokeStyle = '#38bdf8';
+    ctx.globalAlpha = 0.88 * pulse;
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y - 51);
+    ctx.quadraticCurveTo(midX, midY - 51 + wave, b.x, b.y - 51);
+    ctx.moveTo(a.x, a.y - 31);
+    ctx.quadraticCurveTo(midX, midY - 31 - wave * 0.8, b.x, b.y - 31);
+    ctx.stroke();
+
+    // Crisp luminous white-gold inner plasma filaments
+    ctx.strokeStyle = '#f0fdfa';
+    ctx.globalAlpha = 0.82 * pulse;
+    ctx.lineWidth = 1.15;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y - 51);
+    ctx.quadraticCurveTo(midX, midY - 51 + wave, b.x, b.y - 51);
+    ctx.moveTo(a.x, a.y - 31);
+    ctx.quadraticCurveTo(midX, midY - 31 - wave * 0.8, b.x, b.y - 31);
+    ctx.stroke();
+
+    // Drifting spark mote traveling along the top rail
+    const sparkT = (time * 1.15 + fence.pylonAId * 0.37) % 1;
+    const sx = a.x + (b.x - a.x) * sparkT;
+    const sy = a.y - 51 + (b.y - a.y) * sparkT;
+    ctx.fillStyle = '#fef9c3';
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 2.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawAerialUnit(
+  ctx: CanvasRenderingContext2D,
+  atlas: SpriteAtlas,
+  state: WorldState,
+  a: AerialUnit,
+  x: number,
+  y: number,
+  time: number,
+  isSelected: boolean
+): void {
+  const teamCol = getOwnerColor(state, a.owner);
+  const bob = Math.sin(a.animPhase) * (a.kind === 'SKY_LEVIATHAN' ? 4.2 : 3.0);
+  const alt = (a.kind === 'ROVING_WHIRLWIND' ? 14 : a.kind === 'SKY_LEVIATHAN' ? 34 : 30) + bob;
+  const flash = a.hitFlash > 0;
+
+  // Isometric horizontal flight direction (> 0 means moving right on screen)
+  const isoDirX = Math.cos(a.heading) - Math.sin(a.heading);
+  const flipX = isoDirX > 0.08;
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Soft painterly shadow projected far beneath airborne craft
+  ctx.fillStyle = 'rgba(14, 24, 42, 0.3)';
+  ctx.beginPath();
+  ctx.ellipse(
+    5,
+    3,
+    a.kind === 'SKY_LEVIATHAN' ? 23 : a.kind === 'SKY_TRANSPORT' ? 20 : 15,
+    a.kind === 'SKY_LEVIATHAN' ? 11 : a.kind === 'SKY_TRANSPORT' ? 9 : 7,
+    0,
+    0,
+    Math.PI * 2
+  );
+  ctx.fill();
+
+  // Subtle faction ground projection ring so airborne units are easy to locate & click
+  ctx.strokeStyle = teamCol;
+  ctx.globalAlpha = isSelected ? 0.92 : 0.48;
+  ctx.lineWidth = isSelected ? 2.2 : 1.35;
+  ctx.beginPath();
+  ctx.ellipse(0, 2, isSelected ? 23 : 17, isSelected ? 11.5 : 8.5, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  ctx.translate(0, -alt);
+
+  let hpBarY = -58;
+
+  if (a.kind === 'SUN_FLYER') {
+    hpBarY = -58;
+    const drew = drawBespokeSprite(ctx, atlas.units.solarSkiff, 66, 20, flash, false, flipX);
+    if (drew) {
+      // Glowing rear sun-crystal engine thruster bloom & faction pennant
+      const thrustX = flipX ? -22 : 22;
+      const thrustY = -20;
+      const pulse = 0.8 + 0.2 * Math.sin(time * 9 + a.id);
+      const tGlow = ctx.createRadialGradient(thrustX, thrustY, 1, thrustX, thrustY, 12 * pulse);
+      tGlow.addColorStop(0, 'rgba(255, 252, 214, 0.85)');
+      tGlow.addColorStop(0.5, 'rgba(245, 184, 50, 0.35)');
+      tGlow.addColorStop(1, 'rgba(245, 184, 50, 0)');
+      ctx.fillStyle = tGlow;
+      ctx.beginPath();
+      ctx.arc(thrustX, thrustY, 12 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+
+      drawFactionPennant(ctx, flipX ? -8 : 8, -32, teamCol, time, a.id * 0.7);
+    } else {
+      ctx.fillStyle = flash ? '#ffffff' : '#f59e0b';
+      ctx.beginPath();
+      ctx.ellipse(0, -8, 16, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (a.kind === 'SKY_TRANSPORT') {
+    hpBarY = -74;
+    // Glowing Aether grapple tether & bound Priest orb when airlifting a captured Priest
+    if (a.carryingPriestId !== null) {
+      const sway = Math.sin(time * 4.2 + a.id) * 2.5;
+      ctx.save();
+      ctx.strokeStyle = '#fde047';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(0, 12);
+      ctx.lineTo(sway, 29);
+      ctx.stroke();
+
+      const orbGlow = ctx.createRadialGradient(sway, 31, 2, sway, 31, 13);
+      orbGlow.addColorStop(0, 'rgba(254, 249, 195, 0.95)');
+      orbGlow.addColorStop(0.5, 'rgba(192, 132, 252, 0.55)');
+      orbGlow.addColorStop(1, 'rgba(192, 132, 252, 0)');
+      ctx.fillStyle = orbGlow;
+      ctx.beginPath();
+      ctx.arc(sway, 31, 13, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#fde047';
+      ctx.beginPath();
+      ctx.arc(sway, 31, 4.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    const drew = drawBespokeSprite(ctx, atlas.units.aetherDirigible, 76, 22, flash, false, flipX);
+    if (drew) {
+      // Warm golden lantern bloom under the wooden gondola
+      const pulse = 0.8 + 0.2 * Math.sin(time * 4.5 + a.id);
+      const lGlow = ctx.createRadialGradient(0, 8, 1, 0, 8, 13 * pulse);
+      lGlow.addColorStop(0, 'rgba(255, 250, 200, 0.65)');
+      lGlow.addColorStop(0.55, 'rgba(245, 180, 48, 0.22)');
+      lGlow.addColorStop(1, 'rgba(245, 180, 48, 0)');
+      ctx.fillStyle = lGlow;
+      ctx.beginPath();
+      ctx.arc(0, 8, 13 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+
+      drawFactionPennant(ctx, flipX ? -18 : 18, -46, teamCol, time, a.id * 0.6);
+    } else {
+      ctx.fillStyle = flash ? '#ffffff' : '#e8dec8';
+      ctx.beginPath();
+      ctx.ellipse(0, -14, 20, 11, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (a.kind === 'ROVING_WHIRLWIND') {
+    hpBarY = -66;
+    const swayX = Math.sin(time * 7.5 + a.id) * 2.4;
+    const scalePulse = 1 + Math.sin(time * 9 + a.id) * 0.035;
+    ctx.save();
+    ctx.translate(swayX, 0);
+    ctx.scale(scalePulse, 1);
+    const drew = drawBespokeSprite(ctx, atlas.units.tempestVortex, 68, 18, flash, false, false);
+    ctx.restore();
+
+    if (drew) {
+      // Swirling painterly emerald-mint wind ribbons & emerald core shimmer
+      for (let i = 0; i < 3; i++) {
+        const ang = time * 5.2 + i * 2.1 + a.id;
+        const r = 18 + i * 5;
+        const wy = -14 - i * 11;
+        ctx.strokeStyle = i % 2 === 0 ? 'rgba(94, 234, 212, 0.6)' : 'rgba(240, 253, 250, 0.5)';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(swayX, wy, r, ang, ang + 1.1);
+        ctx.stroke();
+      }
+      // Subtle faction crest dot at crown
+      ctx.fillStyle = teamCol;
+      ctx.beginPath();
+      ctx.arc(swayX, -52, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fef9c3';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = '#5eead4';
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.ellipse(0, -12, 16, 7, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  } else {
+    // SKY_LEVIATHAN — Soaring bioluminescent Sky Man-o-War Cruiser
+    hpBarY = -74;
+    const drew = drawBespokeSprite(ctx, atlas.units.skyLeviathan, 78, 28, flash, false, flipX);
+    if (drew) {
+      const pulse = 0.8 + 0.2 * Math.sin(time * 3.4 + a.id);
+      const bellGlow = ctx.createRadialGradient(0, -34, 2, 0, -34, 24 * pulse);
+      bellGlow.addColorStop(0, 'rgba(186, 230, 253, 0.55)');
+      bellGlow.addColorStop(0.55, 'rgba(56, 189, 248, 0.22)');
+      bellGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+      ctx.fillStyle = bellGlow;
+      ctx.beginPath();
+      ctx.arc(0, -34, 24 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+
+      for (let i = 0; i < 3; i++) {
+        const ang = time * 2.9 + i * 2.1 + a.id;
+        ctx.fillStyle = '#e0f2fe';
+        ctx.beginPath();
+        ctx.arc(Math.cos(ang) * 20, -10 + Math.sin(ang * 1.4) * 9, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      drawFactionPennant(ctx, flipX ? -18 : 18, -46, teamCol, time, a.id * 0.5);
+    } else {
+      ctx.fillStyle = flash ? '#ffffff' : 'rgba(56, 189, 248, 0.72)';
+      ctx.beginPath();
+      ctx.arc(0, -10, 18, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+
+  // Health Bar
+  if (a.hp < a.maxHp) {
+    const ratio = Math.max(0, a.hp / a.maxHp);
+    ctx.fillStyle = 'rgba(10, 16, 26, 0.9)';
+    ctx.fillRect(-16, hpBarY, 32, 4.5);
+    ctx.fillStyle = teamCol;
+    ctx.fillRect(-15, hpBarY + 1, 30 * ratio, 2.5);
+  }
+
+  ctx.restore();
+}
+
+function drawFogOfWarOverlay(
+  ctx: CanvasRenderingContext2D,
+  state: WorldState,
+  minTx: number,
+  maxTx: number,
+  minTy: number,
+  maxTy: number,
+  minIsoX: number,
+  maxIsoX: number,
+  minIsoY: number,
+  maxIsoY: number,
+  _time: number
+): void {
+  const gs = state.gridSize;
+  const grid = state.fogGrid;
+  if (grid.length !== gs * gs) return;
+
+  ctx.save();
+  // Batch explored-shroud tiles (fog === 1)
+  ctx.fillStyle = 'rgba(12, 22, 38, 0.44)';
+  ctx.beginPath();
+  for (let y = minTy; y <= maxTy; y++) {
+    const row = y * gs;
+    for (let x = minTx; x <= maxTx; x++) {
+      if (grid[row + x] !== 1) continue;
+      if (state.tiles[y][x].kind === 'VOID') continue;
+      const pos = tileToIso(x, y);
+      if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
+      const hw = TILE_W * 0.54;
+      const hh = TILE_H * 0.54;
+      ctx.moveTo(pos.x, pos.y - hh);
+      ctx.lineTo(pos.x + hw, pos.y);
+      ctx.lineTo(pos.x, pos.y + hh);
+      ctx.lineTo(pos.x - hw, pos.y);
+      ctx.closePath();
+    }
+  }
+  ctx.fill();
+
+  // Batch unexplored deep storm-cloud shroud tiles (fog === 0)
+  ctx.fillStyle = 'rgba(15, 28, 48, 0.86)';
+  ctx.beginPath();
+  for (let y = minTy; y <= maxTy; y++) {
+    const row = y * gs;
+    for (let x = minTx; x <= maxTx; x++) {
+      if (grid[row + x] !== 0) continue;
+      const pos = tileToIso(x, y);
+      if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
+      const hw = TILE_W * 0.62;
+      const hh = TILE_H * 0.62;
+      ctx.moveTo(pos.x, pos.y - hh);
+      ctx.lineTo(pos.x + hw, pos.y);
+      ctx.lineTo(pos.x, pos.y + hh);
+      ctx.lineTo(pos.x - hw, pos.y);
+      ctx.closePath();
+    }
+  }
+  ctx.fill();
+  ctx.restore();
+}
+
 export function renderMinimap(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -4244,6 +5373,7 @@ export function renderMinimap(
 
   const bounds = getWorldIsoBounds(state.gridSize);
   const gs = state.gridSize;
+  const fogEnabled = state.victoryRules.fogOfWar;
 
   const mapX = (tx: number, ty: number) => {
     const iso = tileToIso(tx, ty);
@@ -4263,11 +5393,15 @@ export function renderMinimap(
     for (let x = 0; x < gs; x++) {
       const tile = state.tiles[y][x];
       if (tile.kind === 'VOID') continue;
+      const fog = fogEnabled ? getFogState(state, x, y) : 2;
+      if (fog === 0) continue;
       const mx = mapX(x, y);
       const my = mapY(x, y);
       if (tile.kind === 'LAND') {
         const poweredByPlayer = (tile.poweredMask & PLAYER_POWER_BIT) !== 0;
-        if (poweredByPlayer) {
+        if (fog === 1) {
+          ctx.fillStyle = '#334d5c';
+        } else if (poweredByPlayer) {
           ctx.fillStyle = '#62b858';
         } else if (tile.poweredMask !== 0) {
           const aiVis = getPoweredAiVisual(state, tile.poweredMask);
@@ -4277,6 +5411,7 @@ export function renderMinimap(
         }
         ctx.fillRect(mx - landDotW * 0.5, my - landDotH * 0.5, landDotW, landDotH);
       } else {
+        if (tile.owner !== 'PLAYER' && fog < 2) continue;
         ctx.fillStyle = getOwnerColor(state, tile.owner);
         ctx.fillRect(mx - bridgeDotW * 0.5, my - bridgeDotH * 0.5, bridgeDotW, bridgeDotH);
       }
@@ -4284,6 +5419,7 @@ export function renderMinimap(
   }
 
   for (const g of state.geysers) {
+    if (fogEnabled && getFogState(state, g.tx, g.ty) === 0) continue;
     ctx.fillStyle = '#facc15';
     ctx.beginPath();
     ctx.arc(mapX(g.tx, g.ty), mapY(g.tx, g.ty), g.isSuper ? 2.8 : 1.8, 0, Math.PI * 2);
@@ -4316,8 +5452,23 @@ export function renderMinimap(
     }
   }
 
+  // Aerial Units on minimap
+  for (const a of state.aerialUnits) {
+    if (a.owner !== 'PLAYER' && !isTileFogVisible(state, a.x, a.y)) continue;
+    const ax = mapX(a.x, a.y);
+    const ay = mapY(a.x, a.y);
+    ctx.fillStyle = a.owner === 'PLAYER' ? '#67e8f9' : getOwnerColor(state, a.owner);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay - 3);
+    ctx.lineTo(ax + 3, ay + 2);
+    ctx.lineTo(ax - 3, ay + 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
   for (const p of state.priests) {
     if (p.state === 'SACRIFICED') continue;
+    if (p.owner !== 'PLAYER' && !isTileFogVisible(state, p.x, p.y)) continue;
     ctx.fillStyle = p.isRogue ? '#c084fc' : p.owner === 'PLAYER' ? '#ffffff' : getOwnerColor(state, p.owner);
     ctx.beginPath();
     ctx.arc(mapX(p.x, p.y), mapY(p.x, p.y), 3.0, 0, Math.PI * 2);

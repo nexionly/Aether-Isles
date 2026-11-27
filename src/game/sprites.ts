@@ -24,6 +24,14 @@ import tidalMortarImgUrl from '../assets/images/sprite_tidal_mortar_179578144955
 import voltCannonBackImgUrl from '../assets/images/sprite_volt_cannon_back_1795782063214.jpg';
 import voltCannonImgUrl from '../assets/images/sprite_volt_cannon_1795781450921.jpg';
 import zephyrLanceBackImgUrl from '../assets/images/sprite_zephyr_lance_back_1795782054942.jpg';
+import aetherDirigibleImgUrl from '../assets/images/sprite_aether_dirigible_1795795675486.jpg';
+import aetherMineImgUrl from '../assets/images/sprite_aether_mine_1795795671422.jpg';
+import aetherRelayImgUrl from '../assets/images/sprite_aether_relay_1795795665683.jpg';
+import fencePylonImgUrl from '../assets/images/sprite_fence_pylon_1795795669582.jpg';
+import skyLeviathanImgUrl from '../assets/images/sprite_sky_leviathan_1795795679966.jpg';
+import skyObservatoryImgUrl from '../assets/images/sprite_sky_observatory_1795795667389.jpg';
+import solarSkiffImgUrl from '../assets/images/sprite_solar_skiff_1795795673484.jpg';
+import tempestVortexImgUrl from '../assets/images/sprite_tempest_vortex_1795795677919.jpg';
 import zephyrLanceImgUrl from '../assets/images/sprite_zephyr_lance_1795781449252.jpg';
 
 export type BespokeStructureKey =
@@ -33,6 +41,10 @@ export type BespokeStructureKey =
   | 'spire'
   | 'workshop'
   | 'aetherMill'
+  | 'aetherRelay'
+  | 'skyObservatory'
+  | 'fencePylon'
+  | 'aetherMine'
   | 'sunDisc'
   | 'siegePedestal'
   | 'galeBallista'
@@ -53,7 +65,11 @@ export type BespokeUnitKey =
   | 'priestWind'
   | 'priestRain'
   | 'priestThunder'
-  | 'priestRogue';
+  | 'priestRogue'
+  | 'solarSkiff'
+  | 'aetherDirigible'
+  | 'tempestVortex'
+  | 'skyLeviathan';
 
 export interface ProcessedStructureSprite {
   canvas: HTMLCanvasElement;
@@ -779,6 +795,22 @@ export function getSpriteAtlas(): SpriteAtlas {
       removeEnclosedMagenta: true,
       sampleSize: 192,
     }),
+    aetherRelay: createBespokeStructureSprite(aetherRelayImgUrl, {
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    skyObservatory: createBespokeStructureSprite(skyObservatoryImgUrl, {
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    fencePylon: createBespokeStructureSprite(fencePylonImgUrl, {
+      aggressiveHaloKey: true,
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    aetherMine: createBespokeStructureSprite(aetherMineImgUrl, {
+      sampleSize: 192,
+    }),
     sunDisc: createBespokeStructureSprite(sunDiscTowerImgUrl, {
       aggressiveHaloKey: true,
       removeEnclosedMagenta: true,
@@ -862,6 +894,24 @@ export function getSpriteAtlas(): SpriteAtlas {
       sampleSize: 192,
     }),
     priestRogue: createBespokeStructureSprite(priestRogueImgUrl, {
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    solarSkiff: createBespokeStructureSprite(solarSkiffImgUrl, {
+      aggressiveHaloKey: true,
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    aetherDirigible: createBespokeStructureSprite(aetherDirigibleImgUrl, {
+      aggressiveHaloKey: true,
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    tempestVortex: createBespokeStructureSprite(tempestVortexImgUrl, {
+      removeEnclosedMagenta: true,
+      sampleSize: 192,
+    }),
+    skyLeviathan: createBespokeStructureSprite(skyLeviathanImgUrl, {
       removeEnclosedMagenta: true,
       sampleSize: 192,
     }),

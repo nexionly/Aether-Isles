@@ -6,7 +6,16 @@ import { SettingsCreditsModal, type SettingsModalView } from './components/Setti
 import { TitleScreen } from './components/TitleScreen';
 import { DEFAULT_VICTORY_RULES } from './game/catalog';
 import { SkybridgeEngine } from './game/simulation';
-import type { Difficulty, Fury, HudSnapshot, PlacementMode, VictoryRules } from './game/types';
+import type {
+  AerialUnitKind,
+  Difficulty,
+  Fury,
+  HudSnapshot,
+  PlacementMode,
+  PriestAbilityId,
+  TechUnlockKey,
+  VictoryRules,
+} from './game/types';
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -173,6 +182,10 @@ export default function App() {
     engineRef.current?.centerOnHome();
   }, []);
 
+  const handleFocusPriest = useCallback(() => {
+    engineRef.current?.focusPlayerPriest();
+  }, []);
+
   const handleZoomIn = useCallback(() => {
     engineRef.current?.zoomBy(1.18);
   }, []);
@@ -188,6 +201,27 @@ export default function App() {
   const handleFocusSacredSite = useCallback(() => {
     engineRef.current?.focusNextSacredSite();
   }, []);
+
+  const handleReclaimSelected = useCallback(() => {
+    engineRef.current?.reclaimSelectedStructure();
+  }, []);
+
+  const handleSummonAerial = useCallback((kind: AerialUnitKind) => {
+    engineRef.current?.summonPlayerAerialUnit(kind);
+  }, []);
+
+  const handleCastPriestAbility = useCallback((abilityId: PriestAbilityId) => {
+    engineRef.current?.castPriestAbility(abilityId);
+  }, []);
+
+  const handleChooseTechUnlock = useCallback((key: TechUnlockKey) => {
+    engineRef.current?.chooseTechUnlock(key);
+  }, []);
+
+  const handleToggleFogOfWar = useCallback(() => {
+    const current = hud?.victoryRules.fogOfWar ?? DEFAULT_VICTORY_RULES.fogOfWar;
+    engineRef.current?.setVictoryRules({ fogOfWar: !current });
+  }, [hud?.victoryRules.fogOfWar]);
 
   const handleReturnTitle = useCallback(() => {
     setSettingsOpen(false);
@@ -230,6 +264,7 @@ export default function App() {
             onStart={handleStartSkirmish}
             onOpenSettings={() => handleOpenSettings('AUDIO')}
             onOpenRules={() => handleOpenSettings('RULES')}
+            onToggleFogOfWar={handleToggleFogOfWar}
             onToggleMusicMute={handleToggleTitleMusicMute}
           />
         </div>
@@ -244,6 +279,10 @@ export default function App() {
           onSetPlacement={handleSetPlacement}
           onRotate={handleRotate}
           onSummonGolem={handleSummonGolem}
+          onSummonAerial={handleSummonAerial}
+          onReclaimSelected={handleReclaimSelected}
+          onCastPriestAbility={handleCastPriestAbility}
+          onChooseTechUnlock={handleChooseTechUnlock}
           onToggleSpeed={handleToggleSpeed}
           onToggleMute={handleToggleMute}
           onToggleRangeOverlay={handleToggleRangeOverlay}
@@ -251,6 +290,7 @@ export default function App() {
           onOpenSettings={() => handleOpenSettings('AUDIO')}
           onPause={handlePause}
           onCenterHome={handleCenterHome}
+          onFocusPriest={handleFocusPriest}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
           onCapturePriest={handleCapturePriest}

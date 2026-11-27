@@ -23,6 +23,10 @@ export type StructureKind =
   | 'SUN_DISC'
   | 'STONE_BLOCKER'
   | 'WINDMILL'
+  | 'OUTPOST'
+  | 'WATCHTOWER'
+  | 'BARRIER_PYLON'
+  | 'BRIDGE_MINE'
   | 'WIND_CROSSBOW'
   | 'WHIRLWIND_SPIRE'
   | 'ZEPHYR_CANNON'
@@ -38,6 +42,10 @@ export type BuildOptionKind =
   | 'SUN_DISC'
   | 'STONE_BLOCKER'
   | 'WINDMILL'
+  | 'OUTPOST'
+  | 'WATCHTOWER'
+  | 'BARRIER_PYLON'
+  | 'BRIDGE_MINE'
   | 'WIND_CROSSBOW'
   | 'WHIRLWIND_SPIRE'
   | 'ZEPHYR_CANNON'
@@ -47,6 +55,16 @@ export type BuildOptionKind =
   | 'THUNDER_CANNON'
   | 'SPARK_PYLON'
   | 'ARC_SPIRE';
+
+export type AerialUnitKind =
+  | 'SUN_FLYER'
+  | 'SKY_TRANSPORT'
+  | 'ROVING_WHIRLWIND'
+  | 'SKY_LEVIATHAN';
+
+export type TechUnlockKey = BuildOptionKind | AerialUnitKind;
+
+export type PriestAbilityId = 'RECALL' | 'SANCTUARY' | 'TEMPEST_CAST';
 
 export interface Tile {
   x: number;
@@ -59,6 +77,7 @@ export interface Tile {
   poweredMask: number; // Bitmask per FactionId (bit 0 = PLAYER, bits 1..6 = AI_1..AI_6)
   variant: number; // Deterministic noise 0..1 for painterly tile shading
   hitFlash: number;
+  unpoweredSeconds: number; // Tracks bridge decay when severed from Temple/Outpost
 }
 
 export interface IslandInfo {
@@ -94,6 +113,10 @@ export interface StructureDef {
   blocksDirectional?: boolean;
   passiveIncome?: number;
   projectileSpeed?: number;
+  visionRadius?: number;
+  isPowerHub?: boolean;
+  isFencePylon?: boolean;
+  isMine?: boolean;
 }
 
 export interface Structure {
@@ -137,9 +160,17 @@ export interface Priest {
   animPhase: number;
   sacrificeTimer: number;
   sacrificedBy: Owner | null;
+  shieldTimer: number;
+  abilityCooldowns: Record<PriestAbilityId, number>;
 }
 
-export type GolemTask = 'IDLE' | 'HARVESTING' | 'RETURNING_CRYSTAL';
+export type GolemTask =
+  | 'IDLE'
+  | 'HARVESTING'
+  | 'RETURNING_CRYSTAL'
+  | 'CAPTURING_PRIEST'
+  | 'RETURNING_PRIEST'
+  | 'REPAIRING';
 
 export interface Golem {
   id: number;
@@ -152,11 +183,77 @@ export interface Golem {
   task: GolemTask;
   targetCrystalId: number | null;
   carryingCrystalValue: number;
+  captureTargetPriestId: number | null;
+  carryingPriestId: number | null;
+  repairTarget: { kind: 'STRUCTURE' | 'BRIDGE'; id?: number; tx: number; ty: number } | null;
   path: Array<{ x: number; y: number }>;
   repathCooldown: number;
   hitFlash: number;
   slowTimer: number;
   walkPhase: number;
+}
+
+export interface AerialUnitDef {
+  kind: AerialUnitKind;
+  name: string;
+  shortName: string;
+  alignment: Alignment;
+  cost: number;
+  maxHp: number;
+  speed: number;
+  range: number;
+  damage: number;
+  fireRate: number;
+  visionRadius: number;
+  tier: 1 | 2;
+  canTransportPriest?: boolean;
+  splashRadius?: number;
+  regenPerSec?: number;
+  description: string;
+}
+
+export interface AerialUnit {
+  id: number;
+  kind: AerialUnitKind;
+  owner: FactionId;
+  x: number;
+  y: number;
+  altitude: number;
+  hp: number;
+  maxHp: number;
+  speed: number;
+  cooldown: number;
+  targetX: number;
+  targetY: number;
+  hasManualOrder: boolean;
+  carryingPriestId: number | null;
+  captureTargetPriestId: number | null;
+  returningToAltar: boolean;
+  hitFlash: number;
+  animPhase: number;
+  heading: number;
+}
+
+export interface EnergyFenceLink {
+  owner: FactionId;
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  pylonAId: number;
+  pylonBId: number;
+  active: boolean;
+}
+
+export interface TechUnlockOption {
+  key: TechUnlockKey;
+  isAerial: boolean;
+  name: string;
+  shortName: string;
+  alignment: Alignment;
+  cost: number;
+  description: string;
+  badge: string;
 }
 
 export interface Geyser {
@@ -286,6 +383,65 @@ export interface FloatingText {
   maxLife: number;
 }
 
+export type VictoryCelebrationTheme =
+  | 'AETHER_COLLECTION'
+  | 'ALTAR_RITUAL'
+  | 'TEMPLE_SIEGE';
+
+export type VictoryParticleShape =
+  | 'CRYSTAL'
+  | 'RUNE'
+  | 'WISP'
+  | 'SPARK'
+  | 'STAR';
+
+export interface VictoryCelebrationParticle {
+  nx: number;
+  ny: number;
+  vx: number;
+  vy: number;
+  size: number;
+  rotation: number;
+  vRot: number;
+  life: number;
+  maxLife: number;
+  color: string;
+  coreColor: string;
+  shape: VictoryParticleShape;
+  swayPhase: number;
+  swayAmp: number;
+  swayFreq: number;
+  gravity: number;
+  drag: number;
+  twinkleSpeed: number;
+  runeVariant: number;
+}
+
+export interface VictoryCelebrationRing {
+  nx: number;
+  ny: number;
+  progress: number;
+  duration: number;
+  maxRadius: number;
+  color: string;
+  secondaryColor: string;
+  style: 'CRYSTAL_PRISM' | 'RITUAL_SIGIL' | 'SIEGE_BURST';
+  rotation: number;
+  vRot: number;
+}
+
+export interface VictoryCelebrationState {
+  theme: VictoryCelebrationTheme;
+  reason: OutcomeReason;
+  elapsed: number;
+  burstTimer: number;
+  ambientTimer: number;
+  primaryColor: string;
+  accentColor: string;
+  particles: VictoryCelebrationParticle[];
+  rings: VictoryCelebrationRing[];
+}
+
 export interface FactionState {
   owner: FactionId;
   label: string;
@@ -300,6 +456,7 @@ export interface FactionState {
   towersDestroyed: number;
   eliminated: boolean;
   dominanceSeconds: number;
+  unlockedTechs: TechUnlockKey[];
 }
 
 export type PlacementMode =
@@ -308,7 +465,7 @@ export type PlacementMode =
   | { type: 'STRUCTURE'; kind: BuildOptionKind; facing: Direction };
 
 export interface SelectedInspect {
-  kind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'GEYSER';
+  kind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'GEYSER' | 'AERIAL';
   id: number;
   title: string;
   subtitle: string;
@@ -319,10 +476,12 @@ export interface SelectedInspect {
   powered?: boolean;
   statusText: string;
   canCommandCapture?: boolean;
+  canReclaim?: boolean;
+  reclaimRefund?: number;
 }
 
 export interface HoverInspect {
-  kind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'GEYSER';
+  kind: 'STRUCTURE' | 'PRIEST' | 'GOLEM' | 'GEYSER' | 'AERIAL';
   id: number;
   title: string;
   factionLabel: string;
@@ -362,6 +521,8 @@ export interface VictoryRules {
   aetherOverload: boolean;
   /** Target Aether reserve threshold when Aether Overload is enabled. */
   aetherOverloadTarget: number;
+  /** Optional Fog of War shrouding unexplored and un-scouted sky islands. */
+  fogOfWar: boolean;
 }
 
 export interface SacredSiteState {
@@ -470,4 +631,19 @@ export interface HudSnapshot {
   victoryRules: VictoryRules;
   victoryProgress: VictoryProgressSnapshot;
   matchStats: MatchStats;
+  unlockedTechs: TechUnlockKey[];
+  pendingTechChoices: TechUnlockOption[] | null;
+  aerialCount: number;
+  maxAerialUnits: number;
+  priestAbilities: Array<{
+    id: PriestAbilityId;
+    name: string;
+    hotkey: string;
+    cost: number;
+    cooldown: number;
+    maxCooldown: number;
+    ready: boolean;
+    description: string;
+  }>;
+  playerPriestShieldTimer: number;
 }

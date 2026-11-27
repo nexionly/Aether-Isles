@@ -14,40 +14,42 @@ export interface MusicTrackInfo {
   mode: MusicMode;
 }
 
+const BASE_URL = import.meta.env.BASE_URL || '/';
+
 export const MUSIC_TRACKS: readonly MusicTrackInfo[] = [
   {
     id: 'title_main',
     title: 'Above the Skybridge',
     role: 'Main Title Theme',
-    src: '/assets/aistudio/Main_Screen_Music_848addba.mp4',
+    src: `${BASE_URL}assets/aistudio/Main_Screen_Music_848addba.mp4`,
     mode: 'TITLE',
   },
   {
     id: 'gameplay_1',
     title: 'Archipelago Ascent',
     role: 'Skirmish Theme I',
-    src: '/assets/aistudio/Game_Play_Music_01_-_Archipelago_Ascent_876414ef.mp4',
+    src: `${BASE_URL}assets/aistudio/Game_Play_Music_01_-_Archipelago_Ascent_876414ef.mp4`,
     mode: 'GAMEPLAY',
   },
   {
     id: 'gameplay_2',
     title: 'Meridian of the Clouds',
     role: 'Skirmish Theme II',
-    src: '/assets/aistudio/Game_Play_Music_02_-__Meridian_of_the._Clouds_9c84d382.mp4',
+    src: `${BASE_URL}assets/aistudio/Game_Play_Music_02_-__Meridian_of_the._Clouds_9c84d382.mp4`,
     mode: 'GAMEPLAY',
   },
   {
     id: 'gameplay_3',
     title: 'Above the Ancient Cloud Kingdoms',
     role: 'Skirmish Theme III',
-    src: '/assets/aistudio/Game_Play_Music_03_-_Above_the_Ancient_Cloud_Kingdoms_360fb92f.mp4',
+    src: `${BASE_URL}assets/aistudio/Game_Play_Music_03_-_Above_the_Ancient_Cloud_Kingdoms_360fb92f.mp4`,
     mode: 'GAMEPLAY',
   },
   {
     id: 'credits_main',
     title: 'Threshold of Dread',
     role: 'Credits Theme',
-    src: '/assets/aistudio/Game_Credits_Music_1da76520.mp4',
+    src: `${BASE_URL}assets/aistudio/Game_Credits_Music_1da76520.mp4`,
     mode: 'CREDITS',
   },
 ];
