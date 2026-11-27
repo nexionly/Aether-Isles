@@ -170,6 +170,18 @@ export default function App() {
     [hud?.phase]
   );
 
+  const handleOpenAudioSettings = useCallback(() => {
+    handleOpenSettings('AUDIO');
+  }, [handleOpenSettings]);
+
+  const handleOpenRulesSettings = useCallback(() => {
+    handleOpenSettings('RULES');
+  }, [handleOpenSettings]);
+
+  const handleOpenCreditsSettings = useCallback(() => {
+    handleOpenSettings('CREDITS');
+  }, [handleOpenSettings]);
+
   const handleCloseSettings = useCallback(() => {
     setSettingsOpen(false);
     if (autoPausedForSettingsRef.current) {
@@ -262,8 +274,8 @@ export default function App() {
             onSelectDifficulty={setSelectedDifficulty}
             onSelectOpponents={setSelectedOpponents}
             onStart={handleStartSkirmish}
-            onOpenSettings={() => handleOpenSettings('AUDIO')}
-            onOpenRules={() => handleOpenSettings('RULES')}
+            onOpenSettings={handleOpenAudioSettings}
+            onOpenRules={handleOpenRulesSettings}
             onToggleFogOfWar={handleToggleFogOfWar}
             onToggleMusicMute={handleToggleTitleMusicMute}
           />
@@ -287,7 +299,7 @@ export default function App() {
           onToggleMute={handleToggleMute}
           onToggleRangeOverlay={handleToggleRangeOverlay}
           onToggleRangeFury={handleToggleRangeFury}
-          onOpenSettings={() => handleOpenSettings('AUDIO')}
+          onOpenSettings={handleOpenAudioSettings}
           onPause={handlePause}
           onCenterHome={handleCenterHome}
           onFocusPriest={handleFocusPriest}
@@ -307,9 +319,9 @@ export default function App() {
           onContinuePlaying={handleContinuePlaying}
           onRestart={handleStartSkirmish}
           onReturnTitle={handleReturnTitle}
-          onOpenSettings={() => handleOpenSettings('AUDIO')}
-          onOpenRules={() => handleOpenSettings('RULES')}
-          onOpenCredits={() => handleOpenSettings('CREDITS')}
+          onOpenSettings={handleOpenAudioSettings}
+          onOpenRules={handleOpenRulesSettings}
+          onOpenCredits={handleOpenCreditsSettings}
         />
       )}
 

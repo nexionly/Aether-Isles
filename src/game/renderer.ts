@@ -26,6 +26,7 @@ import type {
   Geyser,
   Golem,
   ImpactEffect,
+  IslandInfo,
   Owner,
   PlacementMode,
   Priest,
@@ -117,7 +118,178 @@ let sunbeamCache: {
   height: number;
 } | null = null;
 
+let stormVignetteCache: {
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+} | null = null;
+
+let stormTopBandCache: {
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+} | null = null;
+
 const islandLabelAnchorCache = new WeakMap<object, { x: number; y: number }>();
+
+// Reusable per-frame lookup collections (avoids Set/Map GC churn in renderWorld)
+const reusableNearSacredSet = new Set<number>();
+const reusableOccupiedTileSet = new Set<number>();
+const reusableSacredSiteByIslandId = new Map<number, WorldState['sacredSites'][number]>();
+
+// Bounded Pre-Baked Radial Glow Stamp Cache (replaces dozens of per-frame createRadialGradient calls)
+const GLOW_STAMP_SIZE = 64;
+const MAX_GLOW_STAMPS = 128;
+const glowStampCache = new Map<string, HTMLCanvasElement>();
+
+function getGlowStamp(
+  innerColor: string,
+  midColor: string | null,
+  outerColor: string,
+  midStop = 0.55
+): HTMLCanvasElement {
+  const key = `${innerColor}|${midColor ?? ''}|${outerColor}|${midStop}`;
+  const existing = glowStampCache.get(key);
+  if (existing) return existing;
+
+  if (glowStampCache.size >= MAX_GLOW_STAMPS) {
+    const oldest = glowStampCache.keys().next().value;
+    if (oldest !== undefined) glowStampCache.delete(oldest);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = GLOW_STAMP_SIZE;
+  canvas.height = GLOW_STAMP_SIZE;
+  const gctx = canvas.getContext('2d');
+  if (gctx) {
+    const half = GLOW_STAMP_SIZE * 0.5;
+    const grad = gctx.createRadialGradient(half, half, 1.5, half, half, half);
+    grad.addColorStop(0, innerColor);
+    if (midColor) {
+      grad.addColorStop(midStop, midColor);
+    }
+    grad.addColorStop(1, outerColor);
+    gctx.fillStyle = grad;
+    gctx.fillRect(0, 0, GLOW_STAMP_SIZE, GLOW_STAMP_SIZE);
+  }
+  glowStampCache.set(key, canvas);
+  return canvas;
+}
+
+function drawGlowCircle(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  alpha: number,
+  innerColor: string,
+  midColor: string | null,
+  outerColor: string,
+  midStop = 0.55
+): void {
+  if (radius <= 0.5 || alpha <= 0.005) return;
+  const stamp = getGlowStamp(innerColor, midColor, outerColor, midStop);
+  const prevAlpha = ctx.globalAlpha;
+  ctx.globalAlpha = prevAlpha * Math.min(1, alpha);
+  ctx.drawImage(stamp, x - radius, y - radius, radius * 2, radius * 2);
+  ctx.globalAlpha = prevAlpha;
+}
+
+function drawGlowEllipse(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  rx: number,
+  ry: number,
+  alpha: number,
+  innerColor: string,
+  midColor: string | null,
+  outerColor: string,
+  midStop = 0.55
+): void {
+  if (rx <= 0.5 || ry <= 0.5 || alpha <= 0.005) return;
+  const stamp = getGlowStamp(innerColor, midColor, outerColor, midStop);
+  const prevAlpha = ctx.globalAlpha;
+  ctx.globalAlpha = prevAlpha * Math.min(1, alpha);
+  ctx.drawImage(stamp, x - rx, y - ry, rx * 2, ry * 2);
+  ctx.globalAlpha = prevAlpha;
+}
+
+function getStormVignetteCanvas(width: number, height: number): HTMLCanvasElement {
+  const cw = Math.max(1, Math.round(width * 0.5));
+  const ch = Math.max(1, Math.round(height * 0.5));
+  if (stormVignetteCache && stormVignetteCache.width === cw && stormVignetteCache.height === ch) {
+    return stormVignetteCache.canvas;
+  }
+  const canvas = stormVignetteCache?.canvas ?? document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const vctx = canvas.getContext('2d');
+  if (vctx) {
+    vctx.clearRect(0, 0, cw, ch);
+    const rOuter = Math.hypot(cw, ch) * 0.62;
+    const vig = vctx.createRadialGradient(cw * 0.5, ch * 0.5, rOuter * 0.46, cw * 0.5, ch * 0.5, rOuter);
+    vig.addColorStop(0, 'rgba(12, 22, 38, 0)');
+    vig.addColorStop(1, 'rgba(10, 18, 34, 1)');
+    vctx.fillStyle = vig;
+    vctx.fillRect(0, 0, cw, ch);
+  }
+  stormVignetteCache = { canvas, width: cw, height: ch };
+  return canvas;
+}
+
+function getStormTopBandCanvas(width: number, height: number): HTMLCanvasElement {
+  const cw = Math.max(1, Math.round(width * 0.25));
+  const ch = Math.max(1, Math.round(height * 0.55 * 0.5));
+  if (stormTopBandCache && stormTopBandCache.width === cw && stormTopBandCache.height === ch) {
+    return stormTopBandCache.canvas;
+  }
+  const canvas = stormTopBandCache?.canvas ?? document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const bctx = canvas.getContext('2d');
+  if (bctx) {
+    bctx.clearRect(0, 0, cw, ch);
+    const grad = bctx.createLinearGradient(0, 0, 0, ch);
+    grad.addColorStop(0, 'rgba(12, 20, 36, 1)');
+    grad.addColorStop(1, 'rgba(12, 20, 36, 0)');
+    bctx.fillStyle = grad;
+    bctx.fillRect(0, 0, cw, ch);
+  }
+  stormTopBandCache = { canvas, width: cw, height: ch };
+  return canvas;
+}
+
+// Per-Island Offscreen Terrain Cache (2 layers: cliffs/moss/stalactites & top turf/cobble/flagstone)
+// Separating cliffs (Pass 1) and turf (Pass 3) around bridges (Pass 2) guarantees 100% exact
+// isometric painter's depth order even across narrow 1-tile gaps between islands.
+interface IslandWaterfallAnchor {
+  x: number;
+  y: number;
+  fallH: number;
+  seed: number;
+}
+
+interface CachedIslandTerrain {
+  cliffCanvas: HTMLCanvasElement;
+  turfCanvas: HTMLCanvasElement;
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+  minIsoX: number;
+  maxIsoX: number;
+  minIsoY: number;
+  maxIsoY: number;
+  sortedTiles: Array<{ x: number; y: number }>;
+  rimTiles: Array<{ x: number; y: number }>;
+  waterfalls: IslandWaterfallAnchor[];
+  cliffEdgeHash: number;
+  sacredHash: number;
+  lastCheckedVersion: number;
+}
+
+const islandTerrainCache = new WeakMap<IslandInfo, CachedIslandTerrain>();
 
 function getSkyBackdropCanvas(
   width: number,
@@ -380,11 +552,11 @@ export function renderWorld(
   const minTy = Math.max(0, Math.floor(Math.min(cTL.ty, cTR.ty, cBL.ty, cBR.ty)) - tileMargin);
   const maxTy = Math.min(gs - 1, Math.ceil(Math.max(cTL.ty, cTR.ty, cBL.ty, cBR.ty)) + tileMargin);
 
-  // O(1) per-frame lookup sets for sacred flagstones, occupied tiles, & island centers
-  const nearSacredSet = new Set<number>();
-  const occupiedTileSet = new Set<number>();
+  // O(1) per-frame lookup sets (reused module-scoped collections to avoid GC churn)
+  reusableNearSacredSet.clear();
+  reusableOccupiedTileSet.clear();
   for (const s of state.structures) {
-    occupiedTileSet.add(s.ty * gs + s.tx);
+    reusableOccupiedTileSet.add(s.ty * gs + s.tx);
     if (s.kind === 'TEMPLE' || s.kind === 'ALTAR') {
       for (let dy = -1; dy <= 1; dy++) {
         const ny = s.ty + dy;
@@ -392,21 +564,52 @@ export function renderWorld(
         for (let dx = -1; dx <= 1; dx++) {
           const nx = s.tx + dx;
           if (nx >= 0 && nx < gs) {
-            nearSacredSet.add(ny * gs + nx);
+            reusableNearSacredSet.add(ny * gs + nx);
           }
         }
       }
     }
   }
   for (const g of state.geysers) {
-    occupiedTileSet.add(g.ty * gs + g.tx);
+    reusableOccupiedTileSet.add(g.ty * gs + g.tx);
   }
-  const islandCenterById = new Map<number, { cx: number; cy: number }>();
-  for (const isl of state.islands) {
-    islandCenterById.set(isl.id, { cx: Math.round(isl.centerX), cy: Math.round(isl.centerY) });
+  reusableSacredSiteByIslandId.clear();
+  if (state.victoryRules.altarDominance) {
+    for (const s of state.sacredSites) {
+      reusableSacredSiteByIslandId.set(s.islandId, s);
+    }
   }
 
-  // 3. Draw Visible Floating Islands & Vaulted Arched Stone Sky-Bridges in Isometric Painter's Order
+  // 3. Draw Visible Floating Islands (Cached Offscreen Layers) & Vaulted Arched Stone Sky-Bridges
+  // Collect visible islands once for Pass 1 (cliffs + waterfalls) and Pass 3 (turf + territory shimmer)
+  const visibleIslands: Array<{ island: IslandInfo; cached: CachedIslandTerrain }> = [];
+  for (let i = 0; i < state.islands.length; i++) {
+    const island = state.islands[i];
+    const cached = getCachedIslandTerrain(island, state, atlas, reusableNearSacredSet);
+    if (
+      cached.maxIsoX < minIsoX ||
+      cached.minIsoX > maxIsoX ||
+      cached.maxIsoY < minIsoY ||
+      cached.minIsoY > maxIsoY
+    ) {
+      continue;
+    }
+    visibleIslands.push({ island, cached });
+  }
+
+  // Pass 1: Pre-baked Island Cliffs, Moss Overhangs & Stalactites + Live Animated Waterfalls
+  for (let i = 0; i < visibleIslands.length; i++) {
+    const { cached } = visibleIslands[i];
+    ctx.drawImage(cached.cliffCanvas, cached.offsetX, cached.offsetY);
+    const wfs = cached.waterfalls;
+    for (let w = 0; w < wfs.length; w++) {
+      const wf = wfs[w];
+      if (wf.x < minIsoX || wf.x > maxIsoX || wf.y + wf.fallH < minIsoY || wf.y > maxIsoY) continue;
+      drawCliffWaterfall(ctx, wf.x, wf.y, wf.fallH, time, wf.seed);
+    }
+  }
+
+  // Pass 2: Visible Vaulted Arched Stone Sky-Bridges in Isometric Painter's Order
   const minSum = minTx + minTy;
   const maxSum = maxTx + maxTy;
   for (let sum = minSum; sum <= maxSum; sum++) {
@@ -415,24 +618,19 @@ export function renderWorld(
     for (let x = startX; x <= endX; x++) {
       const y = sum - x;
       const tile = state.tiles[y][x];
-      if (tile.kind === 'VOID') continue;
+      if (tile.kind !== 'BRIDGE') continue;
 
       const pos = tileToIso(x, y);
       if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
-
-      if (tile.kind === 'LAND') {
-        const nearSacred = nearSacredSet.has(y * gs + x);
-        const islCenter = islandCenterById.get(tile.islandId);
-        const isCobbleRoad =
-          !nearSacred &&
-          islCenter !== undefined &&
-          ((x === islCenter.cx && Math.abs(y - islCenter.cy) <= 3) ||
-            (y === islCenter.cy && Math.abs(x - islCenter.cx) <= 3));
-        drawLandTile(ctx, atlas, state, tile, pos.x, pos.y, nearSacred, isCobbleRoad, playerColor, time);
-      } else {
-        drawBridgeTile(ctx, state, tile, pos.x, pos.y, time);
-      }
+      drawBridgeTile(ctx, state, tile, pos.x, pos.y, time);
     }
+  }
+
+  // Pass 3: Pre-baked Island Top Turf/Cobble/Flagstone + Batched Dynamic Territory Shimmer & Sacred Runes
+  for (let i = 0; i < visibleIslands.length; i++) {
+    const { island, cached } = visibleIslands[i];
+    ctx.drawImage(cached.turfCanvas, cached.offsetX, cached.offsetY);
+    drawIslandDynamicOverlay(ctx, state, island, cached, reusableNearSacredSet, playerColor, time);
   }
 
   // 3b. Drifting Soft Cloud Shadows & Localized Storm Cell Ground Shadows + Isometric Rain Ripples
@@ -482,9 +680,7 @@ export function renderWorld(
     ctx.fillText(island.name, labelX, labelY);
 
     // Subtle Sacred Site control tag beneath Citadel & Shrine names when Altar Dominance is active
-    const site = state.victoryRules.altarDominance
-      ? state.sacredSites.find((s) => s.islandId === island.id)
-      : undefined;
+    const site = reusableSacredSiteByIslandId.get(island.id);
     if (site) {
       let tagText = 'SACRED SITE';
       let tagColor = '#e6c478';
@@ -534,7 +730,7 @@ export function renderWorld(
       const dyC = pt.y - island.centerY;
       if (dxC * dxC + dyC * dyC < 4.6225) continue;
       if (pt.x === icx || pt.y === icy) continue;
-      if (occupiedTileSet.has(pt.y * gs + pt.x)) continue;
+      if (reusableOccupiedTileSet.has(pt.y * gs + pt.x)) continue;
 
       const pos = tileToIso(pt.x, pt.y);
       if (pos.x < minIsoX || pos.x > maxIsoX || pos.y < minIsoY || pos.y > maxIsoY) continue;
@@ -1264,12 +1460,12 @@ function drawWeatherSkyAtmosphere(
     ctx.fillRect(0, 0, width, height);
 
     if (weather.stormIntensity > 0.06) {
-      // Brooding upper sky storm-band gradient
-      const topGrad = ctx.createLinearGradient(0, 0, 0, height * 0.55);
-      topGrad.addColorStop(0, `rgba(12, 20, 36, ${(weather.stormIntensity * 0.34).toFixed(3)})`);
-      topGrad.addColorStop(1, 'rgba(12, 20, 36, 0)');
-      ctx.fillStyle = topGrad;
-      ctx.fillRect(0, 0, width, height * 0.55);
+      // Brooding upper sky storm-band (pre-baked linear gradient canvas)
+      const topBand = getStormTopBandCanvas(width, height);
+      ctx.save();
+      ctx.globalAlpha = weather.stormIntensity * 0.34;
+      ctx.drawImage(topBand, 0, 0, width, height * 0.55);
+      ctx.restore();
     }
   }
 
@@ -1320,13 +1516,18 @@ function drawEasternStormFront(
   const anchorX = width * (0.76 + ((cycleIdx * 37) % 18) * 0.01);
   const anchorY = height * (0.04 + ((cycleIdx * 23) % 10) * 0.01);
 
-  // Internal cloud illumination glow behind the lightning fork
-  const glow = ctx.createRadialGradient(anchorX, anchorY + height * 0.12, 8, anchorX, anchorY + height * 0.12, width * 0.24);
-  glow.addColorStop(0, `rgba(255, 224, 130, ${flashEnv * 0.34})`);
-  glow.addColorStop(0.55, `rgba(245, 176, 65, ${flashEnv * 0.14})`);
-  glow.addColorStop(1, 'rgba(245, 176, 65, 0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, width, height);
+  // Internal cloud illumination glow behind the lightning fork (cached glow stamp)
+  drawGlowCircle(
+    ctx,
+    anchorX,
+    anchorY + height * 0.12,
+    width * 0.24,
+    flashEnv * 0.38,
+    'rgba(255, 224, 130, 0.9)',
+    'rgba(245, 176, 65, 0.38)',
+    'rgba(245, 176, 65, 0)',
+    0.55
+  );
 
   // Deterministic forked golden bolt path
   const segs = 7;
@@ -1517,40 +1718,36 @@ function drawCliffWaterfall(
   ctx.fillRect(x + 0.4, y + 4 + s2, 2.1, 14);
   ctx.fillRect(x + 3.2, y + 3 + s3, 1.4, 9);
 
-  // Swirling sunlit white mist plumes blooming at the bottom of the cascade
+  // Swirling sunlit white mist plumes blooming at the bottom of the cascade (cached glow stamp)
   const puffPulse = Math.sin(time * 2.6 + seed * 11) * 2.4;
   const mistY = y + fallH * 0.76;
-  const mistGrad = ctx.createRadialGradient(x, mistY, 2, x, mistY, 18 + puffPulse);
-  mistGrad.addColorStop(0, 'rgba(246, 252, 255, 0.62)');
-  mistGrad.addColorStop(0.55, 'rgba(222, 242, 255, 0.28)');
-  mistGrad.addColorStop(1, 'rgba(222, 242, 255, 0)');
-  ctx.fillStyle = mistGrad;
-  ctx.beginPath();
-  ctx.ellipse(x, mistY, 17 + puffPulse, 10 + puffPulse * 0.5, 0, 0, Math.PI * 2);
-  ctx.fill();
+  drawGlowEllipse(
+    ctx,
+    x,
+    mistY,
+    18 + puffPulse,
+    10.5 + puffPulse * 0.5,
+    0.66,
+    'rgba(246, 252, 255, 0.95)',
+    'rgba(222, 242, 255, 0.44)',
+    'rgba(222, 242, 255, 0)',
+    0.55
+  );
 }
 
-function drawLandTile(
+function drawLandTileCliffs(
   ctx: CanvasRenderingContext2D,
-  atlas: SpriteAtlas,
-  state: WorldState,
   tile: Tile,
   cx: number,
   cy: number,
-  nearSacred: boolean,
-  isCobbleRoad: boolean,
-  playerColor: string,
-  time: number
+  southVoid: boolean,
+  eastVoid: boolean
 ): void {
   const hw = TILE_W * 0.5;
   const hh = TILE_H * 0.5;
-  const gs = state.gridSize;
-
-  const southVoid = !inBounds(tile.x, tile.y + 1, gs) || state.tiles[tile.y + 1][tile.x].kind === 'VOID';
-  const eastVoid = !inBounds(tile.x + 1, tile.y, gs) || state.tiles[tile.y][tile.x + 1].kind === 'VOID';
   const cliffDepth = 36 + tile.variant * 24;
 
-  // Faceted Warm Ochre-Sandstone & Slate Craggy Floating Island Undersides (gradient-free layered facets)
+  // Faceted Warm Ochre-Sandstone & Slate Craggy Floating Island Undersides
   if (southVoid) {
     // Base slate-shadow cliff mass
     ctx.beginPath();
@@ -1626,12 +1823,6 @@ function drawLandTile(
       ctx.fillStyle = '#474f5e';
       ctx.fill();
     }
-
-    // Scenic cascading cliffside waterfalls spilling into foaming cloud mist
-    const waterfallHash = (tile.x * 7 + tile.y * 13) % 11;
-    if ((waterfallHash === 0 && tile.variant > 0.25) || (tile.variant > 0.93 && (tile.x + tile.y) % 3 === 0)) {
-      drawCliffWaterfall(ctx, cx - hw * 0.48, cy + hh * 0.52, 78 + tile.variant * 26, time, tile.variant);
-    }
   }
 
   if (eastVoid) {
@@ -1685,48 +1876,330 @@ function drawLandTile(
       ctx.fill();
     }
   }
+}
 
-  // Blit Pre-Rendered Painterly Sunlit Emerald Turf, Cobbled Path, or Marble Flagstone Sprite
-  const sprite = nearSacred
-    ? atlas.flagstoneTile
-    : isCobbleRoad
-      ? atlas.cobbleTiles[Math.floor(tile.variant * atlas.cobbleTiles.length) % atlas.cobbleTiles.length]
-      : atlas.landTiles[Math.floor(tile.variant * atlas.landTiles.length) % atlas.landTiles.length];
-  ctx.drawImage(sprite, cx - sprite.width * 0.5, cy - sprite.height * 0.5);
+function computeIslandEdgeHash(
+  rimTiles: Array<{ x: number; y: number }>,
+  state: WorldState
+): number {
+  const gs = state.gridSize;
+  let h = 2166136261;
+  for (let i = 0; i < rimTiles.length; i++) {
+    const pt = rimTiles[i];
+    const southVoid = !inBounds(pt.x, pt.y + 1, gs) || state.tiles[pt.y + 1][pt.x].kind === 'VOID' ? 1 : 0;
+    const eastVoid = !inBounds(pt.x + 1, pt.y, gs) || state.tiles[pt.y][pt.x + 1].kind === 'VOID' ? 2 : 0;
+    h = Math.imul(h ^ (southVoid | eastVoid), 16777619);
+  }
+  return h | 0;
+}
 
-  // Subtle carved elemental territory shimmer
-  const mask = tile.poweredMask;
-  const poweredByPlayer = (mask & PLAYER_POWER_BIT) !== 0;
-  const contested = mask !== 0 && (mask & (mask - 1)) !== 0;
-  const aiVisual = mask > 0 && !poweredByPlayer ? getPoweredAiVisual(state, mask) : null;
+function computeIslandSacredHash(
+  sortedTiles: Array<{ x: number; y: number }>,
+  gs: number,
+  nearSacredSet: Set<number>
+): number {
+  let h = 2166136261;
+  for (let i = 0; i < sortedTiles.length; i++) {
+    const pt = sortedTiles[i];
+    if (nearSacredSet.has(pt.y * gs + pt.x)) {
+      h = Math.imul(h ^ (pt.y * gs + pt.x), 16777619);
+    }
+  }
+  return h | 0;
+}
 
-  if (contested) {
-    drawIsoDiamond(ctx, cx, cy, TILE_W - 6, TILE_H - 3);
-    ctx.strokeStyle = 'rgba(250, 204, 21, 0.45)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-  } else if (poweredByPlayer) {
-    drawIsoDiamond(ctx, cx, cy, TILE_W - 8, TILE_H - 4);
+function rebuildIslandCliffLayer(
+  cache: CachedIslandTerrain,
+  state: WorldState
+): void {
+  const gs = state.gridSize;
+  const cctx = cache.cliffCanvas.getContext('2d');
+  if (!cctx) return;
+  cctx.clearRect(0, 0, cache.width, cache.height);
+  cache.waterfalls.length = 0;
+
+  const hw = TILE_W * 0.5;
+  const hh = TILE_H * 0.5;
+  const tiles = cache.sortedTiles;
+
+  for (let i = 0; i < tiles.length; i++) {
+    const pt = tiles[i];
+    const tile = state.tiles[pt.y][pt.x];
+    const southVoid = !inBounds(tile.x, tile.y + 1, gs) || state.tiles[tile.y + 1][tile.x].kind === 'VOID';
+    const eastVoid = !inBounds(tile.x + 1, tile.y, gs) || state.tiles[tile.y][tile.x + 1].kind === 'VOID';
+    if (!southVoid && !eastVoid) continue;
+
+    const pos = tileToIso(pt.x, pt.y);
+    drawLandTileCliffs(cctx, tile, pos.x - cache.offsetX, pos.y - cache.offsetY, southVoid, eastVoid);
+
+    if (southVoid) {
+      const waterfallHash = (tile.x * 7 + tile.y * 13) % 11;
+      if ((waterfallHash === 0 && tile.variant > 0.25) || (tile.variant > 0.93 && (tile.x + tile.y) % 3 === 0)) {
+        cache.waterfalls.push({
+          x: pos.x - hw * 0.48,
+          y: pos.y + hh * 0.52,
+          fallH: 78 + tile.variant * 26,
+          seed: tile.variant,
+        });
+      }
+    }
+  }
+}
+
+function rebuildIslandTurfLayer(
+  cache: CachedIslandTerrain,
+  island: IslandInfo,
+  state: WorldState,
+  atlas: SpriteAtlas,
+  nearSacredSet: Set<number>
+): void {
+  const gs = state.gridSize;
+  const tctx = cache.turfCanvas.getContext('2d');
+  if (!tctx) return;
+  tctx.clearRect(0, 0, cache.width, cache.height);
+
+  const icx = Math.round(island.centerX);
+  const icy = Math.round(island.centerY);
+  const tiles = cache.sortedTiles;
+
+  for (let i = 0; i < tiles.length; i++) {
+    const pt = tiles[i];
+    const tile = state.tiles[pt.y][pt.x];
+    const pos = tileToIso(pt.x, pt.y);
+    const lx = pos.x - cache.offsetX;
+    const ly = pos.y - cache.offsetY;
+    const nearSacred = nearSacredSet.has(pt.y * gs + pt.x);
+    const isCobbleRoad =
+      !nearSacred &&
+      ((pt.x === icx && Math.abs(pt.y - icy) <= 3) ||
+        (pt.y === icy && Math.abs(pt.x - icx) <= 3));
+
+    const sprite = nearSacred
+      ? atlas.flagstoneTile
+      : isCobbleRoad
+        ? atlas.cobbleTiles[Math.floor(tile.variant * atlas.cobbleTiles.length) % atlas.cobbleTiles.length]
+        : atlas.landTiles[Math.floor(tile.variant * atlas.landTiles.length) % atlas.landTiles.length];
+    tctx.drawImage(sprite, lx - sprite.width * 0.5, ly - sprite.height * 0.5);
+  }
+}
+
+function getCachedIslandTerrain(
+  island: IslandInfo,
+  state: WorldState,
+  atlas: SpriteAtlas,
+  nearSacredSet: Set<number>
+): CachedIslandTerrain {
+  const gs = state.gridSize;
+  let cache = islandTerrainCache.get(island);
+
+  if (!cache) {
+    const sortedTiles = [...island.tiles].sort((a, b) => a.x + a.y - (b.x + b.y) || a.x - b.x);
+    const rimTiles: Array<{ x: number; y: number }> = [];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (let i = 0; i < sortedTiles.length; i++) {
+      const pt = sortedTiles[i];
+      const pos = tileToIso(pt.x, pt.y);
+      if (pos.x < minX) minX = pos.x;
+      if (pos.x > maxX) maxX = pos.x;
+      if (pos.y < minY) minY = pos.y;
+      if (pos.y > maxY) maxY = pos.y;
+
+      // Only tiles whose S or E neighbor is not LAND can ever toggle southVoid / eastVoid
+      const sNotLand = !inBounds(pt.x, pt.y + 1, gs) || state.tiles[pt.y + 1][pt.x].kind !== 'LAND';
+      const eNotLand = !inBounds(pt.x + 1, pt.y, gs) || state.tiles[pt.y][pt.x + 1].kind !== 'LAND';
+      if (sNotLand || eNotLand) rimTiles.push(pt);
+    }
+
+    const padLeft = Math.ceil(TILE_W * 0.5 + 12);
+    const padRight = Math.ceil(TILE_W * 0.5 + 12);
+    const padTop = Math.ceil(TILE_H * 0.5 + 12);
+    // Enough vertical margin beneath bottom-most tile for max cliff depth (60) + stalactite (22) + hh (16)
+    const padBottom = 112;
+
+    const offsetX = Math.floor(minX - padLeft);
+    const offsetY = Math.floor(minY - padTop);
+    const width = Math.max(1, Math.ceil(maxX + padRight - offsetX));
+    const height = Math.max(1, Math.ceil(maxY + padBottom - offsetY));
+
+    const cliffCanvas = document.createElement('canvas');
+    cliffCanvas.width = width;
+    cliffCanvas.height = height;
+
+    const turfCanvas = document.createElement('canvas');
+    turfCanvas.width = width;
+    turfCanvas.height = height;
+
+    const cliffEdgeHash = computeIslandEdgeHash(rimTiles, state);
+    const sacredHash = computeIslandSacredHash(sortedTiles, gs, nearSacredSet);
+
+    cache = {
+      cliffCanvas,
+      turfCanvas,
+      offsetX,
+      offsetY,
+      width,
+      height,
+      minIsoX: offsetX,
+      maxIsoX: offsetX + width,
+      minIsoY: offsetY,
+      maxIsoY: offsetY + height + 36, // include waterfall cascade reach for culling
+      sortedTiles,
+      rimTiles,
+      waterfalls: [],
+      cliffEdgeHash,
+      sacredHash,
+      lastCheckedVersion: state.terrainVersion,
+    };
+
+    rebuildIslandCliffLayer(cache, state);
+    rebuildIslandTurfLayer(cache, island, state, atlas, nearSacredSet);
+    islandTerrainCache.set(island, cache);
+    return cache;
+  }
+
+  // Only re-check perimeter/sacred hashes when terrainVersion actually changed
+  if (cache.lastCheckedVersion !== state.terrainVersion) {
+    cache.lastCheckedVersion = state.terrainVersion;
+    const nextEdgeHash = computeIslandEdgeHash(cache.rimTiles, state);
+    if (nextEdgeHash !== cache.cliffEdgeHash) {
+      cache.cliffEdgeHash = nextEdgeHash;
+      rebuildIslandCliffLayer(cache, state);
+    }
+    const nextSacredHash = computeIslandSacredHash(cache.sortedTiles, gs, nearSacredSet);
+    if (nextSacredHash !== cache.sacredHash) {
+      cache.sacredHash = nextSacredHash;
+      rebuildIslandTurfLayer(cache, island, state, atlas, nearSacredSet);
+    }
+  }
+
+  return cache;
+}
+
+function drawIslandDynamicOverlay(
+  ctx: CanvasRenderingContext2D,
+  state: WorldState,
+  _island: IslandInfo,
+  cached: CachedIslandTerrain,
+  nearSacredSet: Set<number>,
+  playerColor: string,
+  time: number
+): void {
+  const gs = state.gridSize;
+  const tiles = cached.sortedTiles;
+  const hwTint = (TILE_W - 8) * 0.5;
+  const hhTint = (TILE_H - 4) * 0.5;
+  const hwCont = (TILE_W - 6) * 0.5;
+  const hhCont = (TILE_H - 3) * 0.5;
+
+  let hasPlayer = false;
+  let hasContested = false;
+  let aiColorMap: Map<string, Array<{ x: number; y: number }>> | null = null;
+  let sacredRunes: Array<{ x: number; y: number; tileX: number; color: string }> | null = null;
+
+  // First pass: batch player territory path directly & collect any contested / AI / sacred tiles
+  ctx.beginPath();
+  for (let i = 0; i < tiles.length; i++) {
+    const pt = tiles[i];
+    const tile = state.tiles[pt.y][pt.x];
+    const mask = tile.poweredMask;
+    if (mask === 0) continue;
+
+    const pos = tileToIso(pt.x, pt.y);
+    const poweredByPlayer = (mask & PLAYER_POWER_BIT) !== 0;
+    const contested = (mask & (mask - 1)) !== 0;
+
+    if (contested) {
+      hasContested = true;
+    } else if (poweredByPlayer) {
+      hasPlayer = true;
+      ctx.moveTo(pos.x, pos.y - hhTint);
+      ctx.lineTo(pos.x + hwTint, pos.y);
+      ctx.lineTo(pos.x, pos.y + hhTint);
+      ctx.lineTo(pos.x - hwTint, pos.y);
+      ctx.closePath();
+    } else {
+      const aiVisual = getPoweredAiVisual(state, mask);
+      if (aiVisual) {
+        if (!aiColorMap) aiColorMap = new Map();
+        let list = aiColorMap.get(aiVisual.color);
+        if (!list) {
+          list = [];
+          aiColorMap.set(aiVisual.color, list);
+        }
+        list.push(pos);
+      }
+    }
+
+    if (nearSacredSet.has(pt.y * gs + pt.x)) {
+      const aiVis = !poweredByPlayer ? getPoweredAiVisual(state, mask) : null;
+      if (!sacredRunes) sacredRunes = [];
+      sacredRunes.push({
+        x: pos.x,
+        y: pos.y,
+        tileX: tile.x,
+        color: poweredByPlayer ? playerColor : (aiVis?.color ?? '#ef4444'),
+      });
+    }
+  }
+
+  if (hasPlayer) {
     ctx.fillStyle = playerColor;
     ctx.globalAlpha = 0.06;
     ctx.fill();
     ctx.globalAlpha = 1;
-  } else if (aiVisual) {
-    drawIsoDiamond(ctx, cx, cy, TILE_W - 8, TILE_H - 4);
-    ctx.fillStyle = aiVisual.color;
+  }
+
+  if (aiColorMap) {
     ctx.globalAlpha = 0.07;
-    ctx.fill();
+    for (const [col, pts] of aiColorMap) {
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        ctx.moveTo(p.x, p.y - hhTint);
+        ctx.lineTo(p.x + hwTint, p.y);
+        ctx.lineTo(p.x, p.y + hhTint);
+        ctx.lineTo(p.x - hwTint, p.y);
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
   }
 
-  // Faint ancient carved rune glow on powered sacred tiles
-  if (nearSacred && mask !== 0) {
-    const pulse = 0.28 + Math.sin(time * 2.5 + tile.x) * 0.1;
-    drawIsoDiamond(ctx, cx, cy, TILE_W * 0.5, TILE_H * 0.5);
-    ctx.strokeStyle = poweredByPlayer ? playerColor : (aiVisual?.color ?? '#ef4444');
-    ctx.globalAlpha = pulse;
-    ctx.lineWidth = 1.3;
+  if (hasContested) {
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.45)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i < tiles.length; i++) {
+      const pt = tiles[i];
+      const mask = state.tiles[pt.y][pt.x].poweredMask;
+      if (mask !== 0 && (mask & (mask - 1)) !== 0) {
+        const pos = tileToIso(pt.x, pt.y);
+        ctx.moveTo(pos.x, pos.y - hhCont);
+        ctx.lineTo(pos.x + hwCont, pos.y);
+        ctx.lineTo(pos.x, pos.y + hhCont);
+        ctx.lineTo(pos.x - hwCont, pos.y);
+        ctx.closePath();
+      }
+    }
     ctx.stroke();
+  }
+
+  if (sacredRunes) {
+    ctx.lineWidth = 1.3;
+    for (let i = 0; i < sacredRunes.length; i++) {
+      const sr = sacredRunes[i];
+      const pulse = 0.28 + Math.sin(time * 2.5 + sr.tileX) * 0.1;
+      drawIsoDiamond(ctx, sr.x, sr.y, TILE_W * 0.5, TILE_H * 0.5);
+      ctx.strokeStyle = sr.color;
+      ctx.globalAlpha = pulse;
+      ctx.stroke();
+    }
     ctx.globalAlpha = 1;
   }
 }
@@ -2627,15 +3100,20 @@ function drawGeyser(
   const eruptSoon = Math.max(0, Math.min(1, (2.6 - g.eruptTimer) / 2.6));
   const r = g.isSuper ? 26 : 19;
 
-  // Radiant golden sunlight aura spilling across surrounding island moss
-  const groundHalo = ctx.createRadialGradient(x, y, 4, x, y, r * (1.95 + eruptSoon * 0.4));
-  groundHalo.addColorStop(0, `rgba(255, 236, 138, ${0.42 + pulse * 0.18 + eruptSoon * 0.2})`);
-  groundHalo.addColorStop(0.55, `rgba(245, 180, 48, ${0.18 + pulse * 0.08 + eruptSoon * 0.1})`);
-  groundHalo.addColorStop(1, 'rgba(245, 180, 48, 0)');
-  ctx.fillStyle = groundHalo;
-  ctx.beginPath();
-  ctx.ellipse(x, y, r * 2.05, r * 1.1, 0, 0, Math.PI * 2);
-  ctx.fill();
+  // Radiant golden sunlight aura spilling across surrounding island moss (cached glow stamp)
+  const haloAlpha = Math.min(1, 0.44 + pulse * 0.18 + eruptSoon * 0.22);
+  drawGlowEllipse(
+    ctx,
+    x,
+    y,
+    r * (2.05 + eruptSoon * 0.32),
+    r * (1.1 + eruptSoon * 0.18),
+    haloAlpha,
+    'rgba(255, 236, 138, 0.96)',
+    'rgba(245, 180, 48, 0.44)',
+    'rgba(245, 180, 48, 0)',
+    0.55
+  );
 
   const ventSprite = atlas.structures.aetherVent;
   if (ventSprite.ready) {
@@ -2644,14 +3122,19 @@ function drawGeyser(
     ctx.drawImage(ventSprite.canvas, x - drawW * 0.5, y + (g.isSuper ? 17 : 13) - drawH, drawW, drawH);
 
     // Molten golden geothermal pulse breathing inside the painted crater mouth
-    const coreGrad = ctx.createRadialGradient(x, y - 2, 1, x, y - 2, r * (0.72 + eruptSoon * 0.26));
-    coreGrad.addColorStop(0, `rgba(255, 254, 230, ${0.58 + pulse * 0.25 + eruptSoon * 0.15})`);
-    coreGrad.addColorStop(0.55, `rgba(251, 191, 36, ${0.32 + eruptSoon * 0.28})`);
-    coreGrad.addColorStop(1, 'rgba(217, 119, 6, 0)');
-    ctx.fillStyle = coreGrad;
-    ctx.beginPath();
-    ctx.ellipse(x, y - 2, r * 0.72, r * 0.36, 0, 0, Math.PI * 2);
-    ctx.fill();
+    const coreAlpha = Math.min(1, 0.62 + pulse * 0.24 + eruptSoon * 0.14);
+    drawGlowEllipse(
+      ctx,
+      x,
+      y - 2,
+      r * (0.72 + eruptSoon * 0.16),
+      r * (0.36 + eruptSoon * 0.08),
+      coreAlpha,
+      'rgba(255, 254, 230, 0.96)',
+      'rgba(251, 191, 36, 0.55)',
+      'rgba(217, 119, 6, 0)',
+      0.55
+    );
   } else {
     // Fallback crater while bespoke vent sprite loads
     ctx.fillStyle = '#6a6357';
@@ -2664,15 +3147,18 @@ function drawGeyser(
     ctx.ellipse(x, y - 0.5, r, r * 0.5, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    const grad = ctx.createRadialGradient(x, y - 1, 2, x, y - 1, r * 0.92);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.35, '#fef08a');
-    grad.addColorStop(0.72, '#f59e0b');
-    grad.addColorStop(1, 'rgba(217, 119, 6, 0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.ellipse(x, y - 1, r * 0.85, r * 0.44, 0, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowEllipse(
+      ctx,
+      x,
+      y - 1,
+      r * 0.85,
+      r * 0.44,
+      1,
+      '#ffffff',
+      '#fef08a',
+      'rgba(217, 119, 6, 0)',
+      0.45
+    );
   }
 
   // Faceted golden-amber crystal spires peeking around the vent rim
@@ -2694,14 +3180,17 @@ function drawGeyser(
       const sx = x + Math.sin(time * 3 + s * 1.9) * (3 + sp * 7);
       const sy = y - 4 - sp * (24 + eruptSoon * 20);
       const puffR = 4.5 + sp * (8 + eruptSoon * 5);
-      const puffGrad = ctx.createRadialGradient(sx, sy, 1, sx, sy, puffR);
-      puffGrad.addColorStop(0, `rgba(255, 250, 224, ${(1 - sp) * 0.52 * eruptSoon})`);
-      puffGrad.addColorStop(0.6, `rgba(253, 224, 71, ${(1 - sp) * 0.26 * eruptSoon})`);
-      puffGrad.addColorStop(1, 'rgba(253, 224, 71, 0)');
-      ctx.fillStyle = puffGrad;
-      ctx.beginPath();
-      ctx.arc(sx, sy, puffR, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowCircle(
+        ctx,
+        sx,
+        sy,
+        puffR,
+        (1 - sp) * 0.55 * eruptSoon,
+        'rgba(255, 250, 224, 0.95)',
+        'rgba(253, 224, 71, 0.48)',
+        'rgba(253, 224, 71, 0)',
+        0.6
+      );
     }
   }
 
@@ -2735,13 +3224,17 @@ function drawCrystal(ctx: CanvasRenderingContext2D, c: Crystal, x: number, y: nu
   const baseY = y - 1 - arcLift - bob;
 
   // Warm golden sunlight bloom on moss beneath crystal cluster
-  const halo = ctx.createRadialGradient(x, y + 1, 2, x, y + 1, 16);
-  halo.addColorStop(0, 'rgba(255, 232, 128, 0.48)');
-  halo.addColorStop(1, 'rgba(245, 180, 48, 0)');
-  ctx.fillStyle = halo;
-  ctx.beginPath();
-  ctx.ellipse(x, y + 1, 16, 8.5, 0, 0, Math.PI * 2);
-  ctx.fill();
+  drawGlowEllipse(
+    ctx,
+    x,
+    y + 1,
+    16,
+    8.5,
+    0.5,
+    'rgba(255, 232, 128, 0.96)',
+    null,
+    'rgba(245, 180, 48, 0)'
+  );
 
   // Multi-spire radiant golden crystal cluster (flanking shards + tall central prism)
   drawCrystalSpire(ctx, x - 5.5, baseY + 1, 3.3, 12.5, -3.2);
@@ -3028,14 +3521,17 @@ function drawStructure(
       if (drawBespokeSprite(ctx, atlas.structures.temple, 88, 17, flash, !s.powered)) {
         // Animated sacred orbiting faction halo & radiant golden crystal bloom over sanctuary
         const hover = Math.sin(time * 3.0 + s.animPhase) * 2.8;
-        const glow = ctx.createRadialGradient(0, -34 + hover, 2, 0, -34 + hover, 22);
-        glow.addColorStop(0, 'rgba(255, 248, 198, 0.62)');
-        glow.addColorStop(0.55, 'rgba(245, 186, 54, 0.22)');
-        glow.addColorStop(1, 'rgba(245, 186, 54, 0)');
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(0, -34 + hover, 22, 0, Math.PI * 2);
-        ctx.fill();
+        drawGlowCircle(
+          ctx,
+          0,
+          -34 + hover,
+          22,
+          0.65,
+          'rgba(255, 248, 198, 0.95)',
+          'rgba(245, 186, 54, 0.34)',
+          'rgba(245, 186, 54, 0)',
+          0.55
+        );
 
         ctx.strokeStyle = teamCol;
         ctx.lineWidth = 1.6;
@@ -3199,14 +3695,17 @@ function drawStructure(
         if (s.powered) {
           // Warm pulsing golden glow around the Aether crystal window & subtle rising breeze motes
           const pulse = 0.78 + 0.22 * Math.sin(time * 3.8 + s.animPhase);
-          const winGlow = ctx.createRadialGradient(2, -24, 1, 2, -24, 14 * pulse);
-          winGlow.addColorStop(0, 'rgba(255, 248, 196, 0.58)');
-          winGlow.addColorStop(0.6, 'rgba(245, 184, 50, 0.22)');
-          winGlow.addColorStop(1, 'rgba(245, 184, 50, 0)');
-          ctx.fillStyle = winGlow;
-          ctx.beginPath();
-          ctx.arc(2, -24, 14 * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            2,
+            -24,
+            14 * pulse,
+            0.6,
+            'rgba(255, 248, 196, 0.96)',
+            'rgba(245, 184, 50, 0.36)',
+            'rgba(245, 184, 50, 0)',
+            0.6
+          );
 
           for (let i = 0; i < 3; i++) {
             const p = (time * 0.55 + i * 0.33 + s.animPhase) % 1;
@@ -3247,14 +3746,17 @@ function drawStructure(
       if (drawBespokeSprite(ctx, atlas.structures.sunDisc, 78, 17, flash, !s.powered)) {
         if (s.powered) {
           const pulse = 0.8 + Math.sin(time * 4.5 + s.animPhase) * 0.2;
-          const sunGlow = ctx.createRadialGradient(0, -42, 2, 0, -42, 18 * pulse);
-          sunGlow.addColorStop(0, 'rgba(255, 252, 214, 0.72)');
-          sunGlow.addColorStop(0.55, 'rgba(245, 184, 50, 0.25)');
-          sunGlow.addColorStop(1, 'rgba(245, 184, 50, 0)');
-          ctx.fillStyle = sunGlow;
-          ctx.beginPath();
-          ctx.arc(0, -42, 18 * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            0,
+            -42,
+            18 * pulse,
+            0.74,
+            'rgba(255, 252, 214, 0.96)',
+            'rgba(245, 184, 50, 0.34)',
+            'rgba(245, 184, 50, 0)',
+            0.55
+          );
 
           for (let k = 0; k < 2; k++) {
             const ang = time * 4.2 + s.animPhase + k * Math.PI;
@@ -3303,23 +3805,29 @@ function drawStructure(
         const muzzleY = (isZephyr ? -36 : -33) + dirIso.y * (isZephyr ? 17 : 14) + recoilY;
         if (s.recoil > 0.12) {
           const flare = 7 + s.recoil * 9;
-          const mGlow = ctx.createRadialGradient(muzzleX, muzzleY, 1, muzzleX, muzzleY, flare);
-          mGlow.addColorStop(0, 'rgba(240, 253, 250, 0.95)');
-          mGlow.addColorStop(0.5, isZephyr ? 'rgba(94, 234, 212, 0.65)' : 'rgba(45, 212, 191, 0.55)');
-          mGlow.addColorStop(1, 'rgba(45, 212, 191, 0)');
-          ctx.fillStyle = mGlow;
-          ctx.beginPath();
-          ctx.arc(muzzleX, muzzleY, flare, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            muzzleX,
+            muzzleY,
+            flare,
+            0.96,
+            'rgba(240, 253, 250, 0.98)',
+            isZephyr ? 'rgba(94, 234, 212, 0.68)' : 'rgba(45, 212, 191, 0.58)',
+            'rgba(45, 212, 191, 0)',
+            0.5
+          );
         } else if (s.powered) {
           const pulse = 0.72 + 0.28 * Math.sin(time * 4.6 + s.animPhase);
-          const readyGlow = ctx.createRadialGradient(muzzleX, muzzleY, 1, muzzleX, muzzleY, (isZephyr ? 11 : 8) * pulse);
-          readyGlow.addColorStop(0, 'rgba(204, 251, 241, 0.55)');
-          readyGlow.addColorStop(1, 'rgba(45, 212, 191, 0)');
-          ctx.fillStyle = readyGlow;
-          ctx.beginPath();
-          ctx.arc(muzzleX, muzzleY, (isZephyr ? 11 : 8) * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            muzzleX,
+            muzzleY,
+            (isZephyr ? 11 : 8) * pulse,
+            0.56,
+            'rgba(204, 251, 241, 0.98)',
+            null,
+            'rgba(45, 212, 191, 0)'
+          );
         }
       } else {
         drawIsoBox(ctx, 0, -4, 28, 14, 14, flash ? '#ffffff' : '#ddd0b7', '#b1a186', '#747a87', '#38332c');
@@ -3353,14 +3861,17 @@ function drawStructure(
       if (drawBespokeSprite(ctx, atlas.structures.tidalMortar, 80, 17, flash, !s.powered, false, 0, recoilLift)) {
         if (s.powered) {
           const pulse = 0.8 + 0.2 * Math.sin(time * 4.2 + s.animPhase);
-          const orbGlow = ctx.createRadialGradient(0, -37 + recoilLift, 2, 0, -37 + recoilLift, 16 * pulse);
-          orbGlow.addColorStop(0, 'rgba(224, 242, 254, 0.55)');
-          orbGlow.addColorStop(0.55, 'rgba(56, 189, 248, 0.22)');
-          orbGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
-          ctx.fillStyle = orbGlow;
-          ctx.beginPath();
-          ctx.arc(0, -37 + recoilLift, 16 * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            0,
+            -37 + recoilLift,
+            16 * pulse,
+            0.58,
+            'rgba(224, 242, 254, 0.95)',
+            'rgba(56, 189, 248, 0.38)',
+            'rgba(56, 189, 248, 0)',
+            0.55
+          );
 
           for (let d = 0; d < 2; d++) {
             const p = (time * 0.9 + d * 0.5 + s.animPhase) % 1;
@@ -3382,14 +3893,17 @@ function drawStructure(
       const hover = Math.sin(time * 3.1 + s.animPhase) * 2.2;
       if (drawBespokeSprite(ctx, atlas.structures.manOWar, 78, 17, flash, !s.powered)) {
         if (s.powered) {
-          const glow = ctx.createRadialGradient(0, -37 + hover, 2, 0, -37 + hover, 20);
-          glow.addColorStop(0, 'rgba(186, 230, 253, 0.52)');
-          glow.addColorStop(0.55, 'rgba(56, 189, 248, 0.2)');
-          glow.addColorStop(1, 'rgba(56, 189, 248, 0)');
-          ctx.fillStyle = glow;
-          ctx.beginPath();
-          ctx.arc(0, -37 + hover, 20, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            0,
+            -37 + hover,
+            20,
+            0.54,
+            'rgba(186, 230, 253, 0.95)',
+            'rgba(56, 189, 248, 0.38)',
+            'rgba(56, 189, 248, 0)',
+            0.55
+          );
 
           // Tiny electric bioluminescent motes drifting around the tendrils
           for (let i = 0; i < 3; i++) {
@@ -3419,25 +3933,30 @@ function drawStructure(
         const muzzleY = -36 + dirIso.y * 15 + recoilY;
         if (s.recoil > 0.12) {
           const flare = 9 + s.recoil * 12;
-          const mGlow = ctx.createRadialGradient(muzzleX, muzzleY, 1, muzzleX, muzzleY, flare);
-          mGlow.addColorStop(0, 'rgba(255, 252, 224, 0.98)');
-          mGlow.addColorStop(0.45, 'rgba(250, 204, 21, 0.72)');
-          mGlow.addColorStop(0.8, 'rgba(192, 132, 252, 0.35)');
-          mGlow.addColorStop(1, 'rgba(192, 132, 252, 0)');
-          ctx.fillStyle = mGlow;
-          ctx.beginPath();
-          ctx.arc(muzzleX, muzzleY, flare, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            muzzleX,
+            muzzleY,
+            flare,
+            0.98,
+            'rgba(255, 252, 224, 0.98)',
+            'rgba(250, 204, 21, 0.72)',
+            'rgba(192, 132, 252, 0)',
+            0.48
+          );
         } else if (s.powered) {
           const pulse = 0.75 + 0.25 * Math.sin(time * 9 + s.animPhase);
-          const chargeGlow = ctx.createRadialGradient(muzzleX, muzzleY, 1, muzzleX, muzzleY, 10 * pulse);
-          chargeGlow.addColorStop(0, 'rgba(254, 249, 195, 0.65)');
-          chargeGlow.addColorStop(0.55, 'rgba(245, 158, 11, 0.25)');
-          chargeGlow.addColorStop(1, 'rgba(245, 158, 11, 0)');
-          ctx.fillStyle = chargeGlow;
-          ctx.beginPath();
-          ctx.arc(muzzleX, muzzleY, 10 * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            muzzleX,
+            muzzleY,
+            10 * pulse,
+            0.68,
+            'rgba(254, 249, 195, 0.95)',
+            'rgba(245, 158, 11, 0.36)',
+            'rgba(245, 158, 11, 0)',
+            0.55
+          );
         }
       } else {
         drawIsoBox(ctx, 0, -4, 30, 15, 15, flash ? '#ffffff' : '#cbbca6', '#9d8e7a', '#5f6374', '#2e2c36');
@@ -3459,14 +3978,17 @@ function drawStructure(
       if (s.powered) {
         // Subtle pulsing electric corona around the spire's painted plasma crown
         const pulse = (isArc ? 6.4 : 5.0) + Math.sin(time * 11 + s.animPhase) * 1.6;
-        const crownGlow = ctx.createRadialGradient(0, topY, 1, 0, topY, pulse * 2.2);
-        crownGlow.addColorStop(0, isArc ? 'rgba(255, 250, 200, 0.85)' : 'rgba(216, 180, 254, 0.78)');
-        crownGlow.addColorStop(0.5, isArc ? 'rgba(250, 204, 21, 0.34)' : 'rgba(168, 85, 247, 0.3)');
-        crownGlow.addColorStop(1, 'rgba(168, 85, 247, 0)');
-        ctx.fillStyle = crownGlow;
-        ctx.beginPath();
-        ctx.arc(0, topY, pulse * 2.2, 0, Math.PI * 2);
-        ctx.fill();
+        drawGlowCircle(
+          ctx,
+          0,
+          topY,
+          pulse * 2.2,
+          isArc ? 0.86 : 0.8,
+          isArc ? 'rgba(255, 250, 200, 0.98)' : 'rgba(216, 180, 254, 0.96)',
+          isArc ? 'rgba(250, 204, 21, 0.4)' : 'rgba(168, 85, 247, 0.38)',
+          'rgba(168, 85, 247, 0)',
+          0.5
+        );
       }
       break;
     }
@@ -3474,14 +3996,17 @@ function drawStructure(
     case 'STORM_OBELISK': {
       if (drawBespokeSprite(ctx, atlas.structures.shrineMonolith, 74, 16, flash, !s.powered)) {
         const hover = Math.sin(time * 3 + s.animPhase) * 2.2;
-        const glow = ctx.createRadialGradient(0, -48 + hover, 2, 0, -48 + hover, 17);
-        glow.addColorStop(0, 'rgba(233, 213, 255, 0.72)');
-        glow.addColorStop(0.55, 'rgba(168, 85, 247, 0.28)');
-        glow.addColorStop(1, 'rgba(168, 85, 247, 0)');
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(0, -48 + hover, 17, 0, Math.PI * 2);
-        ctx.fill();
+        drawGlowCircle(
+          ctx,
+          0,
+          -48 + hover,
+          17,
+          0.74,
+          'rgba(233, 213, 255, 0.96)',
+          'rgba(168, 85, 247, 0.38)',
+          'rgba(168, 85, 247, 0)',
+          0.55
+        );
       } else {
         drawIsoBox(ctx, 0, -4, 24, 12, 8, '#cfc1a8', '#9f917a', '#636875', '#2d3038');
         const monGrad = ctx.createLinearGradient(-8, -32, 8, -10);
@@ -3506,14 +4031,17 @@ function drawStructure(
       if (drawBespokeSprite(ctx, atlas.structures.aetherRelay, 82, 17, flash, !s.powered)) {
         if (s.powered) {
           const pulse = 0.8 + 0.2 * Math.sin(time * 3.6 + s.animPhase);
-          const relayGlow = ctx.createRadialGradient(0, -34, 2, 0, -34, 20 * pulse);
-          relayGlow.addColorStop(0, 'rgba(255, 250, 205, 0.74)');
-          relayGlow.addColorStop(0.5, 'rgba(245, 184, 50, 0.28)');
-          relayGlow.addColorStop(1, 'rgba(245, 184, 50, 0)');
-          ctx.fillStyle = relayGlow;
-          ctx.beginPath();
-          ctx.arc(0, -34, 20 * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            0,
+            -34,
+            20 * pulse,
+            0.76,
+            'rgba(255, 250, 205, 0.96)',
+            'rgba(245, 184, 50, 0.38)',
+            'rgba(245, 184, 50, 0)',
+            0.5
+          );
 
           for (let m = 0; m < 3; m++) {
             const mp = (time * 0.68 + m * 0.33 + s.animPhase) % 1;
@@ -3537,14 +4065,17 @@ function drawStructure(
       if (drawBespokeSprite(ctx, atlas.structures.skyObservatory, 78, 17, flash, !s.powered)) {
         if (s.powered) {
           const pulse = 0.78 + 0.22 * Math.sin(time * 3.2 + s.animPhase);
-          const lensGlow = ctx.createRadialGradient(0, -52, 1.5, 0, -52, 15 * pulse);
-          lensGlow.addColorStop(0, 'rgba(224, 242, 254, 0.75)');
-          lensGlow.addColorStop(0.55, 'rgba(56, 189, 248, 0.28)');
-          lensGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
-          ctx.fillStyle = lensGlow;
-          ctx.beginPath();
-          ctx.arc(0, -52, 15 * pulse, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            0,
+            -52,
+            15 * pulse,
+            0.76,
+            'rgba(224, 242, 254, 0.96)',
+            'rgba(56, 189, 248, 0.36)',
+            'rgba(56, 189, 248, 0)',
+            0.55
+          );
 
           // Gentle sweeping horizon glint from the sapphire spyglass lens
           const sweep = time * 1.1 + s.animPhase;
@@ -3574,14 +4105,17 @@ function drawStructure(
       if (drawBespokeSprite(ctx, atlas.structures.fencePylon, 74, 17, flash, !s.powered)) {
         if (s.powered) {
           const hum = 0.78 + 0.22 * Math.sin(time * 7.2 + s.animPhase);
-          const orbGlow = ctx.createRadialGradient(0, -52, 1.5, 0, -52, 16 * hum);
-          orbGlow.addColorStop(0, 'rgba(240, 253, 255, 0.78)');
-          orbGlow.addColorStop(0.5, 'rgba(56, 189, 248, 0.34)');
-          orbGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
-          ctx.fillStyle = orbGlow;
-          ctx.beginPath();
-          ctx.arc(0, -52, 16 * hum, 0, Math.PI * 2);
-          ctx.fill();
+          drawGlowCircle(
+            ctx,
+            0,
+            -52,
+            16 * hum,
+            0.8,
+            'rgba(240, 253, 255, 0.96)',
+            'rgba(56, 189, 248, 0.42)',
+            'rgba(56, 189, 248, 0)',
+            0.5
+          );
 
           for (let k = 0; k < 2; k++) {
             const ang = time * 4.8 + s.animPhase + k * Math.PI;
@@ -3601,14 +4135,17 @@ function drawStructure(
       const pulse = 0.65 + 0.35 * Math.sin(time * 5.2 + s.animPhase);
       if (drawBespokeSprite(ctx, atlas.structures.aetherMine, 42, 10, flash, false)) {
         // Warm pulsing fiery-amber crystal glint at the recessed trigger core
-        const coreGlow = ctx.createRadialGradient(0, -5, 1, 0, -5, 10 * pulse);
-        coreGlow.addColorStop(0, 'rgba(254, 240, 138, 0.78)');
-        coreGlow.addColorStop(0.55, 'rgba(249, 115, 22, 0.32)');
-        coreGlow.addColorStop(1, 'rgba(249, 115, 22, 0)');
-        ctx.fillStyle = coreGlow;
-        ctx.beginPath();
-        ctx.arc(0, -5, 10 * pulse, 0, Math.PI * 2);
-        ctx.fill();
+        drawGlowCircle(
+          ctx,
+          0,
+          -5,
+          10 * pulse,
+          0.8,
+          'rgba(254, 240, 138, 0.96)',
+          'rgba(249, 115, 22, 0.4)',
+          'rgba(249, 115, 22, 0)',
+          0.55
+        );
 
         // Subtle dashed armed perimeter ring visible to owner
         ctx.strokeStyle = '#fb923c';
@@ -3820,13 +4357,7 @@ function drawGolem(
   ctx.ellipse(0, 2, 15.5, 7.6, 0, 0, Math.PI * 2);
   ctx.stroke();
 
-  const baseGlow = ctx.createRadialGradient(0, 2, 2, 0, 2, 16);
-  baseGlow.addColorStop(0, `${teamCol}44`);
-  baseGlow.addColorStop(1, `${teamCol}00`);
-  ctx.fillStyle = baseGlow;
-  ctx.beginPath();
-  ctx.ellipse(0, 2, 15.5, 7.6, 0, 0, Math.PI * 2);
-  ctx.fill();
+  drawGlowEllipse(ctx, 0, 2, 15.5, 7.6, 0.32, teamCol, null, `${teamCol}00`);
   ctx.restore();
 
   if (isSelected) {
@@ -3890,14 +4421,7 @@ function drawGolem(
     const coreX = -drawW * 0.04;
     const coreY = -drawH * 0.61;
     const corePulse = 0.85 + Math.sin(time * 5.2 + g.id) * 0.15;
-    const coreGlow = ctx.createRadialGradient(coreX, coreY, 1, coreX, coreY, 8.5 * corePulse);
-    coreGlow.addColorStop(0, '#ffffff');
-    coreGlow.addColorStop(0.35, teamCol);
-    coreGlow.addColorStop(1, `${teamCol}00`);
-    ctx.fillStyle = coreGlow;
-    ctx.beginPath();
-    ctx.arc(coreX, coreY, 8.5 * corePulse, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowCircle(ctx, coreX, coreY, 8.5 * corePulse, 0.96, '#ffffff', teamCol, `${teamCol}00`, 0.35);
 
     // Subtle glowing team visor glint
     ctx.fillStyle = teamCol;
@@ -3949,14 +4473,17 @@ function drawGolem(
   // Carried Radiant Golden Crystal Payload Overhead with warm light halo
   if (g.carryingCrystalValue > 0) {
     const cy = -42 - bounce + Math.sin(time * 5.2 + g.id) * 1.8;
-    const aura = ctx.createRadialGradient(0, cy - 4, 2, 0, cy - 4, 18);
-    aura.addColorStop(0, 'rgba(255, 248, 196, 0.72)');
-    aura.addColorStop(0.55, 'rgba(245, 186, 54, 0.25)');
-    aura.addColorStop(1, 'rgba(245, 186, 54, 0)');
-    ctx.fillStyle = aura;
-    ctx.beginPath();
-    ctx.arc(0, cy - 4, 18, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowCircle(
+      ctx,
+      0,
+      cy - 4,
+      18,
+      0.74,
+      'rgba(255, 248, 196, 0.96)',
+      'rgba(245, 186, 54, 0.34)',
+      'rgba(245, 186, 54, 0)',
+      0.55
+    );
     drawCrystalSpire(ctx, 0, cy, 6.8, 17, 0.35);
   }
 
@@ -4081,14 +4608,7 @@ function drawPriest(
   ctx.save();
   const ringRx = isSelected ? 19 : 16.5;
   const ringRy = isSelected ? 9.4 : 8.1;
-  const ringGlow = ctx.createRadialGradient(0, 2, 2, 0, 2, ringRx);
-  ringGlow.addColorStop(0, `${robeCol}55`);
-  ringGlow.addColorStop(0.65, `${robeCol}22`);
-  ringGlow.addColorStop(1, `${robeCol}00`);
-  ctx.fillStyle = ringGlow;
-  ctx.beginPath();
-  ctx.ellipse(0, 2, ringRx, ringRy, 0, 0, Math.PI * 2);
-  ctx.fill();
+  drawGlowEllipse(ctx, 0, 2, ringRx, ringRy, 0.36, robeCol, `${robeCol}55`, `${robeCol}00`, 0.65);
 
   ctx.strokeStyle = robeCol;
   ctx.globalAlpha = isStunned ? 0.5 : 0.85;
@@ -4130,14 +4650,7 @@ function drawPriest(
   // Soft Faction Heraldic Halo Behind Priest (ensures instant team color readability in multi-rival battles)
   if (!isStunned) {
     const haloY = -36 - hover;
-    const haloGrad = ctx.createRadialGradient(0, haloY, 3, 0, haloY, 24);
-    haloGrad.addColorStop(0, `${robeCol}58`);
-    haloGrad.addColorStop(0.55, `${robeCol}22`);
-    haloGrad.addColorStop(1, `${robeCol}00`);
-    ctx.fillStyle = haloGrad;
-    ctx.beginPath();
-    ctx.arc(0, haloY, 24, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowCircle(ctx, 0, haloY, 24, 0.36, robeCol, `${robeCol}55`, `${robeCol}00`, 0.55);
 
     // Fine rotating golden/faction crown halo arc behind the mitre
     ctx.save();
@@ -4201,21 +4714,17 @@ function drawPriest(
           ? '#f59e0b'
           : '#fde047';
 
-    const staffGlow = ctx.createRadialGradient(
+    drawGlowCircle(
+      ctx,
       staffTipX,
       staffTipY,
-      1,
-      staffTipX,
-      staffTipY,
-      11.5 * orbPulse
+      11.5 * orbPulse,
+      0.94,
+      'rgba(255, 255, 240, 0.96)',
+      `${orbColor}88`,
+      `${orbColor}00`,
+      0.45
     );
-    staffGlow.addColorStop(0, 'rgba(255, 255, 240, 0.92)');
-    staffGlow.addColorStop(0.45, `${orbColor}88`);
-    staffGlow.addColorStop(1, `${orbColor}00`);
-    ctx.fillStyle = staffGlow;
-    ctx.beginPath();
-    ctx.arc(staffTipX, staffTipY, 11.5 * orbPulse, 0, Math.PI * 2);
-    ctx.fill();
 
     // Subtle orbiting elemental motes around the hovering robes
     for (let i = 0; i < 3; i++) {
@@ -4337,14 +4846,17 @@ function drawPriest(
 
     // Golden binding stasis sphere & rings around captive
     ctx.save();
-    const bindGlow = ctx.createRadialGradient(0, floatY, 3, 0, floatY, 19);
-    bindGlow.addColorStop(0, `${prisonerCol}30`);
-    bindGlow.addColorStop(0.7, 'rgba(253, 224, 71, 0.25)');
-    bindGlow.addColorStop(1, 'rgba(253, 224, 71, 0)');
-    ctx.fillStyle = bindGlow;
-    ctx.beginPath();
-    ctx.arc(0, floatY, 19, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowCircle(
+      ctx,
+      0,
+      floatY,
+      19,
+      0.34,
+      prisonerCol,
+      'rgba(253, 224, 71, 0.72)',
+      'rgba(253, 224, 71, 0)',
+      0.7
+    );
 
     ctx.strokeStyle = '#fde047';
     ctx.lineWidth = 1.7;
@@ -4415,13 +4927,7 @@ function drawProjectile(ctx: CanvasRenderingContext2D, proj: Projectile, time: n
     ctx.stroke();
 
     ctx.rotate(time * 20);
-    const halo = ctx.createRadialGradient(0, 0, 1, 0, 0, 11);
-    halo.addColorStop(0, 'rgba(255, 252, 220, 0.85)');
-    halo.addColorStop(1, 'rgba(245, 180, 48, 0)');
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(0, 0, 11, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowCircle(ctx, 0, 0, 11, 0.85, 'rgba(255, 252, 220, 0.98)', null, 'rgba(245, 180, 48, 0)');
 
     ctx.fillStyle = '#fde047';
     ctx.beginPath();
@@ -4506,15 +5012,7 @@ function drawProjectile(ctx: CanvasRenderingContext2D, proj: Projectile, time: n
     ctx.lineTo(-dirX * 28, -dirY * 28);
     ctx.stroke();
 
-    const sGlow = ctx.createRadialGradient(0, 0, 2, 0, 0, 12);
-    sGlow.addColorStop(0, '#ffffff');
-    sGlow.addColorStop(0.45, '#facc15');
-    sGlow.addColorStop(0.8, '#a855f7');
-    sGlow.addColorStop(1, 'rgba(168, 85, 247, 0)');
-    ctx.fillStyle = sGlow;
-    ctx.beginPath();
-    ctx.arc(0, 0, 12, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowCircle(ctx, 0, 0, 12, 0.98, '#ffffff', '#facc15', 'rgba(168, 85, 247, 0)', 0.5);
   } else {
     // MANOWAR_BOLT & OBELISK_BOLT glowing plasma comet trail
     const cGrad = ctx.createLinearGradient(-dirX * 22, -dirY * 22, 0, 0);
@@ -4829,14 +5327,18 @@ function drawImpactEffect(ctx: CanvasRenderingContext2D, fx: ImpactEffect): void
     const fade = 1 - Math.pow(t, 1.5);
     const rx = (16 + Math.min(1, t * 2.5) * 20) * s;
     const ry = rx * 0.5;
-    const scorch = ctx.createRadialGradient(0, 0, 2, 0, 0, rx);
-    scorch.addColorStop(0, `rgba(18, 15, 22, ${(fade * 0.62).toFixed(2)})`);
-    scorch.addColorStop(0.65, `rgba(48, 32, 24, ${(fade * 0.36).toFixed(2)})`);
-    scorch.addColorStop(1, 'rgba(18, 15, 22, 0)');
-    ctx.fillStyle = scorch;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowEllipse(
+      ctx,
+      0,
+      0,
+      rx,
+      ry,
+      fade * 0.65,
+      'rgba(18, 15, 22, 0.96)',
+      'rgba(48, 32, 24, 0.56)',
+      'rgba(18, 15, 22, 0)',
+      0.65
+    );
 
     if (t < 0.55) {
       const rt = t / 0.55;
@@ -4862,14 +5364,18 @@ function drawImpactEffect(ctx: CanvasRenderingContext2D, fx: ImpactEffect): void
   } else if (fx.kind === 'CRUMBLE') {
     // Monumental crumbling limestone masonry blocks + sunlit dust cloud + shockwave
     const dustR = (14 + easeOut * 38) * s;
-    const dustGrad = ctx.createRadialGradient(0, -6, 2, 0, -6, dustR);
-    dustGrad.addColorStop(0, `rgba(226, 214, 192, ${((1 - t) * 0.52).toFixed(2)})`);
-    dustGrad.addColorStop(0.6, `rgba(176, 162, 138, ${((1 - t) * 0.28).toFixed(2)})`);
-    dustGrad.addColorStop(1, 'rgba(176, 162, 138, 0)');
-    ctx.fillStyle = dustGrad;
-    ctx.beginPath();
-    ctx.ellipse(0, -6, dustR, dustR * 0.62, 0, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlowEllipse(
+      ctx,
+      0,
+      -6,
+      dustR,
+      dustR * 0.62,
+      (1 - t) * 0.54,
+      'rgba(226, 214, 192, 0.96)',
+      'rgba(176, 162, 138, 0.52)',
+      'rgba(176, 162, 138, 0)',
+      0.6
+    );
 
     if (t < 0.6) {
       const rt = t / 0.6;
@@ -4980,22 +5486,19 @@ function drawLocalizedStormGroundShadows(
     // Localized terrain flash illumination whenever this cell discharges lightning
     if (cell.flash > 0.03) {
       const flashR = cell.radiusIso * 0.85;
-      const grad = ctx.createRadialGradient(
-        cell.isoX,
-        cell.isoY,
-        12,
-        cell.isoX,
-        cell.isoY,
-        flashR
-      );
-      grad.addColorStop(0, `rgba(205, 232, 255, ${(cell.flash * 0.28).toFixed(3)})`);
-      grad.addColorStop(0.55, `rgba(147, 197, 253, ${(cell.flash * 0.11).toFixed(3)})`);
-      grad.addColorStop(1, 'rgba(147, 197, 253, 0)');
       ctx.globalAlpha = 1;
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.ellipse(cell.isoX, cell.isoY, flashR, flashR * 0.54, 0, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowEllipse(
+        ctx,
+        cell.isoX,
+        cell.isoY,
+        flashR,
+        flashR * 0.54,
+        cell.flash * 0.3,
+        'rgba(205, 232, 255, 0.95)',
+        'rgba(147, 197, 253, 0.38)',
+        'rgba(147, 197, 253, 0)',
+        0.55
+      );
     }
   }
   ctx.restore();
@@ -5192,15 +5695,19 @@ function drawLocalizedStormCells(
     // Internal thunderhead sheet-lightning glow when discharging
     if (cell.flash > 0.03) {
       const glowR = cell.radiusIso * 0.66;
-      const g = ctx.createRadialGradient(cell.isoX, canopyY + 6, 8, cell.isoX, canopyY + 6, glowR);
-      g.addColorStop(0, `rgba(224, 242, 254, ${(cell.flash * 0.45).toFixed(3)})`);
-      g.addColorStop(0.55, `rgba(147, 197, 253, ${(cell.flash * 0.18).toFixed(3)})`);
-      g.addColorStop(1, 'rgba(147, 197, 253, 0)');
       ctx.globalAlpha = 1;
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(cell.isoX, canopyY + 6, glowR, glowR * 0.48, 0, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowEllipse(
+        ctx,
+        cell.isoX,
+        canopyY + 6,
+        glowR,
+        glowR * 0.48,
+        cell.flash * 0.48,
+        'rgba(224, 242, 254, 0.96)',
+        'rgba(147, 197, 253, 0.4)',
+        'rgba(147, 197, 253, 0)',
+        0.55
+      );
     }
   }
 
@@ -5277,21 +5784,12 @@ function drawWeatherScreenOverlay(
     ctx.stroke();
   }
 
-  // 2. Subtle atmospheric storm edge vignette for depth (never obscures center playfield)
+  // 2. Subtle atmospheric storm edge vignette for depth (cached offscreen canvas)
   if (effectiveStorm > 0.08) {
-    const rOuter = Math.hypot(width, height) * 0.62;
-    const vig = ctx.createRadialGradient(
-      width * 0.5,
-      height * 0.5,
-      rOuter * 0.46,
-      width * 0.5,
-      height * 0.5,
-      rOuter
-    );
-    vig.addColorStop(0, 'rgba(12, 22, 38, 0)');
-    vig.addColorStop(1, `rgba(10, 18, 34, ${(effectiveStorm * 0.28).toFixed(3)})`);
-    ctx.fillStyle = vig;
-    ctx.fillRect(0, 0, width, height);
+    const vigCanvas = getStormVignetteCanvas(width, height);
+    ctx.globalAlpha = effectiveStorm * 0.28;
+    ctx.drawImage(vigCanvas, 0, 0, width, height);
+    ctx.globalAlpha = 1;
   }
 
   // 3. Gentle sheet-lightning ambient flash when a localized bolt cracks on/near screen
@@ -5597,14 +6095,17 @@ function drawAerialUnit(
       const thrustX = flipX ? -22 : 22;
       const thrustY = -20;
       const pulse = 0.8 + 0.2 * Math.sin(time * 9 + a.id);
-      const tGlow = ctx.createRadialGradient(thrustX, thrustY, 1, thrustX, thrustY, 12 * pulse);
-      tGlow.addColorStop(0, 'rgba(255, 252, 214, 0.85)');
-      tGlow.addColorStop(0.5, 'rgba(245, 184, 50, 0.35)');
-      tGlow.addColorStop(1, 'rgba(245, 184, 50, 0)');
-      ctx.fillStyle = tGlow;
-      ctx.beginPath();
-      ctx.arc(thrustX, thrustY, 12 * pulse, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowCircle(
+        ctx,
+        thrustX,
+        thrustY,
+        12 * pulse,
+        0.86,
+        'rgba(255, 252, 214, 0.98)',
+        'rgba(245, 184, 50, 0.42)',
+        'rgba(245, 184, 50, 0)',
+        0.5
+      );
 
       drawFactionPennant(ctx, flipX ? -8 : 8, -32, teamCol, time, a.id * 0.7);
     } else {
@@ -5626,14 +6127,17 @@ function drawAerialUnit(
       ctx.lineTo(sway, 29);
       ctx.stroke();
 
-      const orbGlow = ctx.createRadialGradient(sway, 31, 2, sway, 31, 13);
-      orbGlow.addColorStop(0, 'rgba(254, 249, 195, 0.95)');
-      orbGlow.addColorStop(0.5, 'rgba(192, 132, 252, 0.55)');
-      orbGlow.addColorStop(1, 'rgba(192, 132, 252, 0)');
-      ctx.fillStyle = orbGlow;
-      ctx.beginPath();
-      ctx.arc(sway, 31, 13, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowCircle(
+        ctx,
+        sway,
+        31,
+        13,
+        0.95,
+        'rgba(254, 249, 195, 0.98)',
+        'rgba(192, 132, 252, 0.58)',
+        'rgba(192, 132, 252, 0)',
+        0.5
+      );
 
       ctx.fillStyle = '#fde047';
       ctx.beginPath();
@@ -5646,14 +6150,17 @@ function drawAerialUnit(
     if (drew) {
       // Warm golden lantern bloom under the wooden gondola
       const pulse = 0.8 + 0.2 * Math.sin(time * 4.5 + a.id);
-      const lGlow = ctx.createRadialGradient(0, 8, 1, 0, 8, 13 * pulse);
-      lGlow.addColorStop(0, 'rgba(255, 250, 200, 0.65)');
-      lGlow.addColorStop(0.55, 'rgba(245, 180, 48, 0.22)');
-      lGlow.addColorStop(1, 'rgba(245, 180, 48, 0)');
-      ctx.fillStyle = lGlow;
-      ctx.beginPath();
-      ctx.arc(0, 8, 13 * pulse, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowCircle(
+        ctx,
+        0,
+        8,
+        13 * pulse,
+        0.66,
+        'rgba(255, 250, 200, 0.96)',
+        'rgba(245, 180, 48, 0.34)',
+        'rgba(245, 180, 48, 0)',
+        0.55
+      );
 
       drawFactionPennant(ctx, flipX ? -18 : 18, -46, teamCol, time, a.id * 0.6);
     } else {
@@ -5705,14 +6212,17 @@ function drawAerialUnit(
     const drew = drawBespokeSprite(ctx, atlas.units.skyLeviathan, 78, 28, flash, false, flipX);
     if (drew) {
       const pulse = 0.8 + 0.2 * Math.sin(time * 3.4 + a.id);
-      const bellGlow = ctx.createRadialGradient(0, -34, 2, 0, -34, 24 * pulse);
-      bellGlow.addColorStop(0, 'rgba(186, 230, 253, 0.55)');
-      bellGlow.addColorStop(0.55, 'rgba(56, 189, 248, 0.22)');
-      bellGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
-      ctx.fillStyle = bellGlow;
-      ctx.beginPath();
-      ctx.arc(0, -34, 24 * pulse, 0, Math.PI * 2);
-      ctx.fill();
+      drawGlowCircle(
+        ctx,
+        0,
+        -34,
+        24 * pulse,
+        0.58,
+        'rgba(186, 230, 253, 0.96)',
+        'rgba(56, 189, 248, 0.38)',
+        'rgba(56, 189, 248, 0)',
+        0.55
+      );
 
       for (let i = 0; i < 3; i++) {
         const ang = time * 2.9 + i * 2.1 + a.id;
@@ -5803,6 +6313,103 @@ function drawFogOfWarOverlay(
   ctx.restore();
 }
 
+let minimapTerrainCache: {
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+  gridSize: number;
+  terrainVersion: number;
+  fogOfWar: boolean;
+  stateRef: WorldState;
+} | null = null;
+
+function getMinimapTerrainCanvas(
+  width: number,
+  height: number,
+  state: WorldState,
+  bounds: { minX: number; minY: number; spanX: number; spanY: number }
+): HTMLCanvasElement {
+  const cw = Math.max(1, Math.round(width));
+  const ch = Math.max(1, Math.round(height));
+  const gs = state.gridSize;
+  const fogEnabled = state.victoryRules.fogOfWar;
+
+  if (
+    minimapTerrainCache &&
+    minimapTerrainCache.width === cw &&
+    minimapTerrainCache.height === ch &&
+    minimapTerrainCache.gridSize === gs &&
+    minimapTerrainCache.terrainVersion === state.terrainVersion &&
+    minimapTerrainCache.fogOfWar === fogEnabled &&
+    minimapTerrainCache.stateRef === state
+  ) {
+    return minimapTerrainCache.canvas;
+  }
+
+  const canvas = minimapTerrainCache?.canvas ?? document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const mctx = canvas.getContext('2d');
+  if (mctx) {
+    // Dual sunlit-sky-to-storm-front minimap backdrop
+    const bgGrad = mctx.createLinearGradient(0, 0, cw, ch);
+    bgGrad.addColorStop(0, '#2a5f99');
+    bgGrad.addColorStop(0.55, '#254c78');
+    bgGrad.addColorStop(1, '#142238');
+    mctx.fillStyle = bgGrad;
+    mctx.fillRect(0, 0, cw, ch);
+
+    const landDotW = Math.max(2.0, 3.6 * (50 / gs));
+    const landDotH = Math.max(1.6, 2.8 * (50 / gs));
+    const bridgeDotW = Math.max(1.8, 3.0 * (50 / gs));
+    const bridgeDotH = Math.max(1.5, 2.4 * (50 / gs));
+    const invSpanX = cw / bounds.spanX;
+    const invSpanY = ch / bounds.spanY;
+
+    for (let y = 0; y < gs; y++) {
+      const row = state.tiles[y];
+      for (let x = 0; x < gs; x++) {
+        const tile = row[x];
+        if (tile.kind === 'VOID') continue;
+        const fog = fogEnabled ? getFogState(state, x, y) : 2;
+        if (fog === 0) continue;
+        const iso = tileToIso(x, y);
+        const mx = (iso.x - bounds.minX) * invSpanX;
+        const my = (iso.y - bounds.minY) * invSpanY;
+        if (tile.kind === 'LAND') {
+          const poweredByPlayer = (tile.poweredMask & PLAYER_POWER_BIT) !== 0;
+          if (fog === 1) {
+            mctx.fillStyle = '#334d5c';
+          } else if (poweredByPlayer) {
+            mctx.fillStyle = '#62b858';
+          } else if (tile.poweredMask !== 0) {
+            const aiVis = getPoweredAiVisual(state, tile.poweredMask);
+            mctx.fillStyle = aiVis?.landTint ?? '#9e5054';
+          } else {
+            mctx.fillStyle = '#6da654';
+          }
+          mctx.fillRect(mx - landDotW * 0.5, my - landDotH * 0.5, landDotW, landDotH);
+        } else {
+          if (tile.owner !== 'PLAYER' && fog < 2) continue;
+          mctx.fillStyle = getOwnerColor(state, tile.owner);
+          mctx.fillRect(mx - bridgeDotW * 0.5, my - bridgeDotH * 0.5, bridgeDotW, bridgeDotH);
+        }
+      }
+    }
+  }
+
+  minimapTerrainCache = {
+    canvas,
+    width: cw,
+    height: ch,
+    gridSize: gs,
+    terrainVersion: state.terrainVersion,
+    fogOfWar: fogEnabled,
+    stateRef: state,
+  };
+  return canvas;
+}
+
 export function renderMinimap(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -5812,17 +6419,12 @@ export function renderMinimap(
   viewW: number,
   viewH: number
 ): void {
-  // Dual sunlit-sky-to-storm-front minimap backdrop
-  const bgGrad = ctx.createLinearGradient(0, 0, width, height);
-  bgGrad.addColorStop(0, '#2a5f99');
-  bgGrad.addColorStop(0.55, '#254c78');
-  bgGrad.addColorStop(1, '#142238');
-  ctx.fillStyle = bgGrad;
-  ctx.fillRect(0, 0, width, height);
-
   const bounds = getWorldIsoBounds(state.gridSize);
-  const gs = state.gridSize;
   const fogEnabled = state.victoryRules.fogOfWar;
+
+  // Blit cached static minimap terrain/bridge/fog backdrop (rebuilt only on terrainVersion/fog/resize changes)
+  const terrainCanvas = getMinimapTerrainCanvas(width, height, state, bounds);
+  ctx.drawImage(terrainCanvas, 0, 0, width, height);
 
   const mapX = (tx: number, ty: number) => {
     const iso = tileToIso(tx, ty);
@@ -5832,40 +6434,6 @@ export function renderMinimap(
     const iso = tileToIso(tx, ty);
     return ((iso.y - bounds.minY) / bounds.spanY) * height;
   };
-
-  const landDotW = Math.max(2.0, 3.6 * (50 / gs));
-  const landDotH = Math.max(1.6, 2.8 * (50 / gs));
-  const bridgeDotW = Math.max(1.8, 3.0 * (50 / gs));
-  const bridgeDotH = Math.max(1.5, 2.4 * (50 / gs));
-
-  for (let y = 0; y < gs; y++) {
-    for (let x = 0; x < gs; x++) {
-      const tile = state.tiles[y][x];
-      if (tile.kind === 'VOID') continue;
-      const fog = fogEnabled ? getFogState(state, x, y) : 2;
-      if (fog === 0) continue;
-      const mx = mapX(x, y);
-      const my = mapY(x, y);
-      if (tile.kind === 'LAND') {
-        const poweredByPlayer = (tile.poweredMask & PLAYER_POWER_BIT) !== 0;
-        if (fog === 1) {
-          ctx.fillStyle = '#334d5c';
-        } else if (poweredByPlayer) {
-          ctx.fillStyle = '#62b858';
-        } else if (tile.poweredMask !== 0) {
-          const aiVis = getPoweredAiVisual(state, tile.poweredMask);
-          ctx.fillStyle = aiVis?.landTint ?? '#9e5054';
-        } else {
-          ctx.fillStyle = '#6da654';
-        }
-        ctx.fillRect(mx - landDotW * 0.5, my - landDotH * 0.5, landDotW, landDotH);
-      } else {
-        if (tile.owner !== 'PLAYER' && fog < 2) continue;
-        ctx.fillStyle = getOwnerColor(state, tile.owner);
-        ctx.fillRect(mx - bridgeDotW * 0.5, my - bridgeDotH * 0.5, bridgeDotW, bridgeDotH);
-      }
-    }
-  }
 
   for (const g of state.geysers) {
     if (fogEnabled && getFogState(state, g.tx, g.ty) === 0) continue;

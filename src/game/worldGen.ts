@@ -75,6 +75,16 @@ export interface WorldState {
   elapsedSeconds: number;
   nextEntityId: number;
   weather: WeatherState;
+  /** O(1) spatial lookup grid for structures (indexed by ty * gridSize + tx) */
+  structureGrid: Array<Structure | null>;
+  /** O(1) spatial lookup grid for geysers (1 = geyser present) */
+  geyserGrid: Uint8Array;
+  /** Active BRIDGE tile indices (ty * gridSize + tx) to avoid full-grid scans */
+  bridgeTileKeys: Set<number>;
+  /** Active tiles with hitFlash > 0 to avoid full-grid flash decay scans */
+  flashingTileKeys: Set<number>;
+  /** Monotonic version incremented when bridges, power masks, or fog change (for minimap caching) */
+  terrainVersion: number;
 }
 
 export function tileToIso(tx: number, ty: number): { x: number; y: number } {
@@ -1037,6 +1047,20 @@ export function createInitialWorld(
   const fogGrid = new Uint8Array(gridSize * gridSize);
   fogGrid.fill(victoryRules.fogOfWar ? 0 : 2);
 
+  const totalCells = gridSize * gridSize;
+  const structureGrid = new Array<Structure | null>(totalCells).fill(null);
+  for (const s of structures) {
+    if (s.tx >= 0 && s.ty >= 0 && s.tx < gridSize && s.ty < gridSize) {
+      structureGrid[s.ty * gridSize + s.tx] = s;
+    }
+  }
+  const geyserGrid = new Uint8Array(totalCells);
+  for (const g of geysers) {
+    if (g.tx >= 0 && g.ty >= 0 && g.tx < gridSize && g.ty < gridSize) {
+      geyserGrid[g.ty * gridSize + g.tx] = 1;
+    }
+  }
+
   const state: WorldState = {
     gridSize,
     opponentCount,
@@ -1067,6 +1091,11 @@ export function createInitialWorld(
     elapsedSeconds: 0,
     nextEntityId: nextId,
     weather: createInitialWeatherState(),
+    structureGrid,
+    geyserGrid,
+    bridgeTileKeys: new Set<number>(),
+    flashingTileKeys: new Set<number>(),
+    terrainVersion: 1,
   };
 
   recomputePowerGrids(state);

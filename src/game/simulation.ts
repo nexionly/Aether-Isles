@@ -1,4 +1,4 @@
-import { AiCommander } from './ai';
+import { AiCommander, type AiCallbacks } from './ai';
 import {
   WebAudioManager,
   type AudioHookEvent,
@@ -51,6 +51,8 @@ import {
   isTilePoweredBy,
   isWalkable,
   recomputePowerGrids,
+  registerStructureOnGrid,
+  unregisterStructureOnGrid,
 } from './pathfinding';
 import { renderMinimap, renderWorld, screenToWorldIso, worldToScreen, type CameraState } from './renderer';
 import type {
@@ -162,9 +164,15 @@ export class SkybridgeEngine {
   private alertBanner: { text: string; tone: 'INFO' | 'WARNING' | 'SACRIFICE'; timer: number } | null = null;
   private hudEmitTimer = 0;
   private onHudUpdate: (snap: HudSnapshot) => void;
+  private aiCallbacks: AiCallbacks;
+  private isPageHidden = false;
+  private needsStaticRender = true;
+  private lastMenuRenderAt = 0;
+  private pendingHoverScreen: { sx: number; sy: number } | null = null;
 
   // Bound DOM listeners for clean teardown
   private handleResizeBound: () => void;
+  private handleVisibilityChangeBound: () => void;
   private handleKeyDownBound: (e: KeyboardEvent) => void;
   private handleKeyUpBound: (e: KeyboardEvent) => void;
   private handleBlurBound: () => void;
@@ -191,7 +199,14 @@ export class SkybridgeEngine {
     this.state = createInitialWorld('WIND', 'ARCHON', 1, this.victoryRules);
     this.centerOnHome();
 
+    this.aiCallbacks = {
+      placeBridge: this.placeBridge.bind(this),
+      placeStructure: this.placeStructure.bind(this),
+      summonGolem: this.summonGolem.bind(this),
+    };
+
     this.handleResizeBound = this.handleResize.bind(this);
+    this.handleVisibilityChangeBound = this.handleVisibilityChange.bind(this);
     this.handleKeyDownBound = this.handleKeyDown.bind(this);
     this.handleKeyUpBound = this.handleKeyUp.bind(this);
     this.handleBlurBound = this.handleBlur.bind(this);
@@ -206,6 +221,7 @@ export class SkybridgeEngine {
     this.handleTouchEndBound = this.handleTouchEnd.bind(this);
     this.handleFirstGestureBound = this.handleFirstGesture.bind(this);
 
+    this.isPageHidden = typeof document !== 'undefined' && document.hidden;
     this.onAudioEvent(this.audio.handleEvent);
     this.unsubscribeTrackChange = this.audio.onTrackChange(() => this.emitHud());
     this.syncMusicState();
@@ -304,6 +320,8 @@ export class SkybridgeEngine {
       'INFO',
       7
     );
+    this.pendingHoverScreen = null;
+    this.resumeLoop();
     this.emitHud();
   }
 
@@ -344,6 +362,7 @@ export class SkybridgeEngine {
       this.recomputeFogOfWar();
     } else {
       this.state.fogGrid.fill(2);
+      this.state.terrainVersion++;
     }
 
     if (!this.victoryRules.altarDominance) {
@@ -361,6 +380,7 @@ export class SkybridgeEngine {
       this.overloadWarned70.clear();
       this.overloadWarned90.clear();
     }
+    this.requestStaticRender();
     this.emitHud();
   }
 
@@ -391,6 +411,7 @@ export class SkybridgeEngine {
       'SACRIFICE',
       6.5
     );
+    this.resumeLoop();
     this.emitHud();
   }
 
@@ -400,6 +421,8 @@ export class SkybridgeEngine {
       this.heldKeys.clear();
       this.hoveredId = null;
       this.hoveredKind = null;
+      this.pendingHoverScreen = null;
+      this.needsStaticRender = true;
       this.audio.setAmbience(false, this.state.factions.PLAYER.fury);
       this.syncMusicState();
       this.emitHud();
@@ -409,6 +432,7 @@ export class SkybridgeEngine {
       this.audio.unlock();
       this.audio.setAmbience(true, this.state.factions.PLAYER.fury, 0.52);
       this.syncMusicState();
+      this.resumeLoop();
       this.emitHud();
     }
   }
@@ -422,8 +446,11 @@ export class SkybridgeEngine {
     this.selectedKind = null;
     this.hoveredId = null;
     this.hoveredKind = null;
+    this.pendingHoverScreen = null;
     this.audio.setAmbience(false, this.state.factions.PLAYER.fury);
+    this.audio.setWeatherAmbience(0, 0);
     this.syncMusicState();
+    this.resumeLoop();
     this.emitHud();
   }
 
@@ -710,11 +737,17 @@ export class SkybridgeEngine {
   }
 
   public destroy(): void {
-    if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
     this.unsubscribeTrackChange?.();
     this.unsubscribeTrackChange = null;
     this.audioListeners.clear();
     this.audio.dispose();
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChangeBound);
+    }
     window.removeEventListener('pointerdown', this.handleFirstGestureBound);
     window.removeEventListener('keydown', this.handleFirstGestureBound);
     window.removeEventListener('resize', this.handleResizeBound);
@@ -734,6 +767,9 @@ export class SkybridgeEngine {
   }
 
   private attachEvents(): void {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChangeBound);
+    }
     window.addEventListener('pointerdown', this.handleFirstGestureBound, { passive: true });
     window.addEventListener('keydown', this.handleFirstGestureBound, { passive: true });
     window.addEventListener('resize', this.handleResizeBound);
@@ -752,11 +788,49 @@ export class SkybridgeEngine {
     this.canvas.addEventListener('touchcancel', this.handleTouchEndBound, { passive: false });
   }
 
+  private handleVisibilityChange(): void {
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    this.isPageHidden = hidden;
+    this.audio.setPageHidden(hidden);
+    if (hidden) {
+      this.heldKeys.clear();
+      if (this.rafId !== null) {
+        cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+    } else {
+      this.lastTimestamp = performance.now();
+      this.needsStaticRender = true;
+      this.resumeLoop();
+    }
+  }
+
+  private requestStaticRender(): void {
+    this.needsStaticRender = true;
+    if (!this.isPageHidden && this.rafId === null) {
+      this.render();
+      this.needsStaticRender = false;
+    }
+  }
+
+  private resumeLoop(): void {
+    if (this.isPageHidden) return;
+    this.needsStaticRender = true;
+    if (this.rafId === null) {
+      this.startLoop();
+    }
+  }
+
   private handleResize(): void {
     const parent = this.canvas.parentElement;
     const w = parent ? parent.clientWidth : window.innerWidth;
     const h = parent ? parent.clientHeight : window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const isCoarsePointer =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(pointer: coarse)').matches;
+    const maxDpr = isCoarsePointer ? 1.25 : 1.5;
+    const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
     this.viewW = w;
     this.viewH = h;
     this.canvas.width = Math.floor(w * dpr);
@@ -765,6 +839,7 @@ export class SkybridgeEngine {
     const rect = this.canvas.getBoundingClientRect();
     this.canvasLeft = rect.left;
     this.canvasTop = rect.top;
+    this.requestStaticRender();
   }
 
   private handleBlur(): void {
@@ -897,6 +972,7 @@ export class SkybridgeEngine {
       const dy = e.clientY - this.dragStartY;
       if (!this.dragMoved && Math.hypot(dx, dy) > 7) {
         this.dragMoved = true;
+        this.pendingHoverScreen = null;
         this.clearHoveredEntity();
       }
       if (this.dragMoved) {
@@ -907,13 +983,16 @@ export class SkybridgeEngine {
     }
 
     if (e.target !== this.canvas && !this.isDragging) {
+      this.pendingHoverScreen = null;
       this.clearHoveredEntity();
       return;
     }
 
-    const sx = e.clientX - this.canvasLeft;
-    const sy = e.clientY - this.canvasTop;
-    this.updateHoverTileFromScreen(sx, sy);
+    // Coalesce raw mousemove raycasts to once per animation frame
+    this.pendingHoverScreen = {
+      sx: e.clientX - this.canvasLeft,
+      sy: e.clientY - this.canvasTop,
+    };
   }
 
   private handleMouseUp(e: MouseEvent): void {
@@ -1384,14 +1463,48 @@ export class SkybridgeEngine {
   }
 
   private startLoop(): void {
+    if (this.rafId !== null || this.isPageHidden) return;
     this.lastTimestamp = performance.now();
+    this.lastMenuRenderAt = 0;
+
     const tick = (now: number) => {
+      if (this.isPageHidden) {
+        this.rafId = null;
+        return;
+      }
+
+      // Pause & Defeat static screens: render once on demand and sleep GPU completely until resumed
+      if (this.phase === 'PAUSED' || this.phase === 'DEFEAT') {
+        if (this.needsStaticRender) {
+          this.render();
+          this.needsStaticRender = false;
+        }
+        this.rafId = null;
+        return;
+      }
+
+      // Title menu backdrop: smooth 30 FPS cadence saves ~50% GPU/battery while browsing menus
+      if (this.phase === 'TITLE_MENU') {
+        if (this.lastMenuRenderAt > 0 && now - this.lastMenuRenderAt < 32) {
+          this.rafId = requestAnimationFrame(tick);
+          return;
+        }
+        this.lastMenuRenderAt = now;
+      }
+
       const rawDt = (now - this.lastTimestamp) / 1000;
       this.lastTimestamp = now;
       const clampedDt = Math.min(Math.max(rawDt, 0), 0.05);
 
       this.animTime += clampedDt;
       this.updateCamera(clampedDt);
+
+      // Process coalesced pointer hover at most once per animation frame
+      if (this.pendingHoverScreen) {
+        const { sx, sy } = this.pendingHoverScreen;
+        this.pendingHoverScreen = null;
+        this.updateHoverTileFromScreen(sx, sy);
+      }
 
       if (this.phase === 'PLAYING' || this.phase === 'TITLE_MENU') {
         const prevWeatherPhase = this.state.weather.phase;
@@ -1473,6 +1586,13 @@ export class SkybridgeEngine {
             remaining -= stepDt;
           }
         }
+
+        // Wall-clock HUD snapshot throttle (~6.25Hz independent of 2x/3x/5x simulation speed)
+        this.hudEmitTimer += clampedDt;
+        if (this.hudEmitTimer >= 0.16) {
+          this.hudEmitTimer = 0;
+          this.emitHud();
+        }
       } else if (this.phase === 'VICTORY') {
         this.updateEffects(clampedDt);
         this.updateVictoryCelebration(clampedDt);
@@ -1552,13 +1672,18 @@ export class SkybridgeEngine {
       f.stormPower += baseIncome * (id === 'PLAYER' ? 1 : aiDiffMult) * dt;
     }
 
-    // Tile hit flashes
-    const gs = state.gridSize;
-    for (let y = 0; y < gs; y++) {
-      const row = state.tiles[y];
-      for (let x = 0; x < gs; x++) {
-        if (row[x].hitFlash > 0) {
-          row[x].hitFlash = Math.max(0, row[x].hitFlash - dt * 5);
+    // Tile hit flashes (O(flashing) instead of full-grid O(gs^2) scan)
+    if (state.flashingTileKeys.size > 0) {
+      const gs = state.gridSize;
+      for (const idx of state.flashingTileKeys) {
+        const tx = idx % gs;
+        const ty = (idx - tx) / gs;
+        const tile = state.tiles[ty][tx];
+        if (tile.hitFlash > 0) {
+          tile.hitFlash = Math.max(0, tile.hitFlash - dt * 5);
+        }
+        if (tile.hitFlash <= 0) {
+          state.flashingTileKeys.delete(idx);
         }
       }
     }
@@ -1596,22 +1721,11 @@ export class SkybridgeEngine {
 
     // 8. AI High Priest Commander (damp AI decision speedup at 2x/3x/5x so computer doesn't outpace human clicks)
     const aiThinkDt = this.speedMultiplier > 1 ? dt / Math.pow(this.speedMultiplier, 0.45) : dt;
-    this.ai.update(state, aiThinkDt, {
-      placeBridge: this.placeBridge.bind(this),
-      placeStructure: this.placeStructure.bind(this),
-      summonGolem: this.summonGolem.bind(this),
-    });
+    this.ai.update(state, aiThinkDt, this.aiCallbacks);
 
     // 9. Alternative Victory Conditions (Altar Dominance & Aether Overload)
     if (this.phase === 'PLAYING') {
       this.updateVictoryConditions(dt);
-    }
-
-    // 10. Throttled HUD snapshot
-    this.hudEmitTimer += dt;
-    if (this.hudEmitTimer >= 0.12) {
-      this.hudEmitTimer = 0;
-      this.emitHud();
     }
   }
 
@@ -1636,6 +1750,7 @@ export class SkybridgeEngine {
     faction.stormPower -= def.cost;
     faction.bridgesPlaced += 1;
 
+    const gs = this.state.gridSize;
     for (const cell of check.cells) {
       const tile = this.state.tiles[cell.y][cell.x];
       tile.kind = 'BRIDGE';
@@ -1643,6 +1758,9 @@ export class SkybridgeEngine {
       tile.hp = BRIDGE_TILE_HP;
       tile.maxHp = BRIDGE_TILE_HP;
       tile.hitFlash = 0.25;
+      const cellKey = cell.y * gs + cell.x;
+      this.state.bridgeTileKeys.add(cellKey);
+      this.state.flashingTileKeys.add(cellKey);
       this.spawnBurst(cell.x, cell.y, faction.color, 5, 38);
     }
 
@@ -1706,6 +1824,7 @@ export class SkybridgeEngine {
       buildProgress: 0.05,
     };
     this.state.structures.push(struct);
+    registerStructureOnGrid(this.state, struct);
     if (def.isPowerHub) {
       recomputePowerGrids(this.state);
     }
@@ -1736,6 +1855,7 @@ export class SkybridgeEngine {
     const refund = Math.round(def.cost * RECLAIM_REFUND_RATE);
 
     this.state.structures = this.state.structures.filter((s) => s.id !== st.id);
+    unregisterStructureOnGrid(this.state, st.tx, st.ty, st.id);
     this.state.factions.PLAYER.stormPower += refund;
     if (this.selectedKind === 'STRUCTURE' && this.selectedId === st.id) {
       this.selectedKind = null;
@@ -2123,10 +2243,14 @@ export class SkybridgeEngine {
         s.hp = Math.min(s.maxHp, s.hp + def.regenPerSec * dt);
       }
 
-      // Frost slow aura against hostile Golems
+      // Frost slow aura against hostile Golems (squared distance avoids sqrt)
       if (def.slowAuraRadius) {
+        const auraSq = def.slowAuraRadius * def.slowAuraRadius;
         for (const g of state.golems) {
-          if (g.owner !== s.owner && Math.hypot(g.x - s.tx, g.y - s.ty) <= def.slowAuraRadius) {
+          if (g.owner === s.owner) continue;
+          const dx = g.x - s.tx;
+          const dy = g.y - s.ty;
+          if (dx * dx + dy * dy <= auraSq) {
             g.slowTimer = Math.max(g.slowTimer, 0.5);
           }
         }
@@ -2294,13 +2418,13 @@ export class SkybridgeEngine {
       revealCircle(s.tx, s.ty, radius);
     }
 
-    // Player bridges grant short frontier sight
-    for (let y = 0; y < N; y++) {
-      for (let x = 0; x < N; x++) {
-        const t = this.state.tiles[y][x];
-        if (t.kind === 'BRIDGE' && t.owner === 'PLAYER') {
-          revealCircle(x, y, 3.2);
-        }
+    // Player bridges grant short frontier sight (iterate active bridge keys instead of full grid)
+    for (const idx of this.state.bridgeTileKeys) {
+      const bx = idx % N;
+      const by = (idx - bx) / N;
+      const t = this.state.tiles[by][bx];
+      if (t.kind === 'BRIDGE' && t.owner === 'PLAYER') {
+        revealCircle(bx, by, 3.2);
       }
     }
 
@@ -2324,6 +2448,8 @@ export class SkybridgeEngine {
         revealCircle(a.x, a.y, AERIAL_CATALOG[a.kind].visionRadius);
       }
     }
+
+    this.state.terrainVersion++;
   }
 
   private recomputeEnergyFences(): void {
@@ -2372,22 +2498,25 @@ export class SkybridgeEngine {
   }
 
   private updateBridgeDecay(dt: number): void {
+    if (this.state.bridgeTileKeys.size === 0) return;
     const N = this.state.gridSize;
-    for (let y = 0; y < N; y++) {
-      for (let x = 0; x < N; x++) {
-        const tile = this.state.tiles[y][x];
-        if (tile.kind !== 'BRIDGE') {
-          tile.unpoweredSeconds = 0;
-          continue;
+    // Snapshot keys only when decay actually threatens to collapse a tile (iterate directly over Set safely)
+    for (const idx of this.state.bridgeTileKeys) {
+      const x = idx % N;
+      const y = (idx - x) / N;
+      const tile = this.state.tiles[y][x];
+      if (tile.kind !== 'BRIDGE') {
+        tile.unpoweredSeconds = 0;
+        this.state.bridgeTileKeys.delete(idx);
+        continue;
+      }
+      if (tile.poweredMask === 0) {
+        tile.unpoweredSeconds += dt;
+        if (tile.unpoweredSeconds > BRIDGE_DECAY_GRACE_SECONDS) {
+          this.damageBridgeTile(x, y, BRIDGE_DECAY_DPS * dt);
         }
-        if (tile.poweredMask === 0) {
-          tile.unpoweredSeconds += dt;
-          if (tile.unpoweredSeconds > BRIDGE_DECAY_GRACE_SECONDS) {
-            this.damageBridgeTile(x, y, BRIDGE_DECAY_DPS * dt);
-          }
-        } else if (tile.unpoweredSeconds > 0) {
-          tile.unpoweredSeconds = Math.max(0, tile.unpoweredSeconds - dt * 3);
-        }
+      } else if (tile.unpoweredSeconds > 0) {
+        tile.unpoweredSeconds = Math.max(0, tile.unpoweredSeconds - dt * 3);
       }
     }
   }
@@ -2416,8 +2545,9 @@ export class SkybridgeEngine {
           this.spawnBurst(p.x, p.y, '#38bdf8', 5, 36);
         }
       }
-      for (const g of [...this.state.golems]) {
-        if (g.owner === fence.owner) continue;
+      for (let i = this.state.golems.length - 1; i >= 0; i--) {
+        const g = this.state.golems[i];
+        if (!g || g.owner === fence.owner) continue;
         if (this.pointToSegmentDist(g.x, g.y, fence.ax, fence.ay, fence.bx, fence.by) <= 0.62) {
           this.damageGolem(g, 14);
           this.spawnBurst(g.x, g.y, '#38bdf8', 5, 36);
@@ -2427,43 +2557,59 @@ export class SkybridgeEngine {
   }
 
   private updateBridgeMines(_dt: number): void {
-    const mines = this.state.structures.filter((s) => s.kind === 'BRIDGE_MINE');
-    if (mines.length === 0) return;
+    const triggerSq = 0.92 * 0.92;
+    let triggeredMines: Structure[] | null = null;
 
-    for (const mine of mines) {
+    for (let i = 0; i < this.state.structures.length; i++) {
+      const mine = this.state.structures[i];
+      if (mine.kind !== 'BRIDGE_MINE') continue;
       let triggered = false;
       for (const p of this.state.priests) {
-        if (p.state === 'ACTIVE' && p.owner !== mine.owner && Math.hypot(p.x - mine.tx, p.y - mine.ty) <= 0.92) {
+        if (p.state !== 'ACTIVE' || p.owner === mine.owner) continue;
+        const dx = p.x - mine.tx;
+        const dy = p.y - mine.ty;
+        if (dx * dx + dy * dy <= triggerSq) {
           triggered = true;
           break;
         }
       }
       if (!triggered) {
         for (const g of this.state.golems) {
-          if (g.owner !== mine.owner && Math.hypot(g.x - mine.tx, g.y - mine.ty) <= 0.92) {
+          if (g.owner === mine.owner) continue;
+          const dx = g.x - mine.tx;
+          const dy = g.y - mine.ty;
+          if (dx * dx + dy * dy <= triggerSq) {
             triggered = true;
             break;
           }
         }
       }
       if (triggered) {
-        this.state.structures = this.state.structures.filter((s) => s.id !== mine.id);
-        this.applyAreaDamage(mine.owner, mine.tx, mine.ty, 1.75, 95, 1.25);
-        this.spawnBurst(mine.tx, mine.ty, '#f97316', 24, 92);
-        this.spawnImpact(mine.tx, mine.ty, 'SCORCH_RING', '#fb923c', 1.4, 1.35);
-        this.triggerShake(2.8, mine.tx, mine.ty);
-        this.addFloatingText(mine.tx, mine.ty, 'SNARE DETONATED!', '#fb923c');
-        this.emitAudio({
-          type: 'PROJECTILE_IMPACT',
-          alignment: 'SUN',
-          heavy: true,
-          tx: mine.tx,
-          ty: mine.ty,
-        });
-        if (this.selectedKind === 'STRUCTURE' && this.selectedId === mine.id) {
-          this.selectedKind = null;
-          this.selectedId = null;
-        }
+        if (!triggeredMines) triggeredMines = [];
+        triggeredMines.push(mine);
+      }
+    }
+
+    if (!triggeredMines) return;
+
+    for (const mine of triggeredMines) {
+      this.state.structures = this.state.structures.filter((s) => s.id !== mine.id);
+      unregisterStructureOnGrid(this.state, mine.tx, mine.ty, mine.id);
+      this.applyAreaDamage(mine.owner, mine.tx, mine.ty, 1.75, 95, 1.25);
+      this.spawnBurst(mine.tx, mine.ty, '#f97316', 24, 92);
+      this.spawnImpact(mine.tx, mine.ty, 'SCORCH_RING', '#fb923c', 1.4, 1.35);
+      this.triggerShake(2.8, mine.tx, mine.ty);
+      this.addFloatingText(mine.tx, mine.ty, 'SNARE DETONATED!', '#fb923c');
+      this.emitAudio({
+        type: 'PROJECTILE_IMPACT',
+        alignment: 'SUN',
+        heavy: true,
+        tx: mine.tx,
+        ty: mine.ty,
+      });
+      if (this.selectedKind === 'STRUCTURE' && this.selectedId === mine.id) {
+        this.selectedKind = null;
+        this.selectedId = null;
       }
     }
   }
@@ -3131,6 +3277,7 @@ export class SkybridgeEngine {
 
     if (st.hp <= 0) {
       this.state.structures = this.state.structures.filter((item) => item.id !== st.id);
+      unregisterStructureOnGrid(this.state, st.tx, st.ty, st.id);
       this.spawnBurst(st.tx, st.ty, st.kind === 'TEMPLE' ? '#fde047' : '#f59e0b', st.kind === 'TEMPLE' ? 32 : 16, st.kind === 'TEMPLE' ? 95 : 68);
       this.spawnImpact(
         st.tx,
@@ -3171,6 +3318,7 @@ export class SkybridgeEngine {
         if (st.owner === 'PLAYER') {
           this.outcomeReason = 'TEMPLE_DESTRUCTION';
           this.phase = 'DEFEAT';
+          this.needsStaticRender = true;
           this.audio.setAmbience(false, this.state.factions.PLAYER.fury);
           this.syncMusicState();
           this.emitAudio({ type: 'DEFEAT' });
@@ -3187,23 +3335,29 @@ export class SkybridgeEngine {
   private damageBridgeTile(tx: number, ty: number, amount: number): void {
     const tile = this.state.tiles[ty][tx];
     if (tile.kind !== 'BRIDGE') return;
+    const gs = this.state.gridSize;
+    const tileKey = ty * gs + tx;
     tile.hp -= amount;
     tile.hitFlash = 1;
+    this.state.flashingTileKeys.add(tileKey);
     if (tile.hp <= 0) {
       const lostOwner = tile.owner;
       tile.kind = 'VOID';
       tile.owner = null;
       tile.hp = 0;
       tile.maxHp = 0;
+      tile.unpoweredSeconds = 0;
+      this.state.bridgeTileKeys.delete(tileKey);
       this.spawnBurst(tx, ty, '#94a3b8', 18, 75);
       this.spawnImpact(tx, ty, 'CRUMBLE', '#cbd5e1', 0.9, 0.95);
       this.triggerShake(2.1, tx, ty);
       this.emitAudio({ type: 'BRIDGE_BROKEN', tx, ty });
 
       // Any structure built on this shattered bridge tile collapses into the clouds!
-      const doomedStructs = this.state.structures.filter((s) => s.tx === tx && s.ty === ty);
-      if (doomedStructs.length > 0) {
+      const doomedStruct = getStructureAt(this.state, tx, ty);
+      if (doomedStruct) {
         this.state.structures = this.state.structures.filter((s) => !(s.tx === tx && s.ty === ty));
+        unregisterStructureOnGrid(this.state, tx, ty);
       }
 
       // Any Golem standing on the collapsed bridge falls into the abyss (rescuing any captive Priest!)
@@ -3903,6 +4057,7 @@ export class SkybridgeEngine {
     if (priest.owner === 'PLAYER') {
       this.outcomeReason = 'PRIEST_SACRIFICE';
       this.phase = 'DEFEAT';
+      this.needsStaticRender = true;
       this.audio.setAmbience(false, this.state.factions.PLAYER.fury);
       this.syncMusicState();
       this.emitAudio({ type: 'DEFEAT' });
@@ -4026,9 +4181,10 @@ export class SkybridgeEngine {
         const island = state.islands.find((isl) => isl.id === site.islandId);
         if (!island) continue;
 
-        const tileSet = new Set(island.tiles.map((pt) => `${pt.x},${pt.y}`));
         const guardedByNeutral = state.structures.some(
-          (s) => s.owner === 'NEUTRAL' && tileSet.has(`${s.tx},${s.ty}`)
+          (s) =>
+            s.owner === 'NEUTRAL' &&
+            state.tiles[s.ty][s.tx].islandId === site.islandId
         );
         site.guardedByNeutral = guardedByNeutral;
 
@@ -4195,6 +4351,7 @@ export class SkybridgeEngine {
       this.recordLocalVictory();
     } else {
       this.phase = 'DEFEAT';
+      this.needsStaticRender = true;
       this.syncMusicState();
       this.emitAudio({ type: 'DEFEAT' });
     }

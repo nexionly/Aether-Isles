@@ -5,15 +5,43 @@ import {
   isFactionId,
   rotateCells,
 } from './catalog';
-import type { Direction, FactionId, Owner, TetrominoKey } from './types';
+import type { Direction, FactionId, Owner, Structure, TetrominoKey } from './types';
 import type { WorldState } from './worldGen';
 
-const CARDINAL_DIRS = [
-  { dx: 1, dy: 0 },
-  { dx: -1, dy: 0 },
-  { dx: 0, dy: 1 },
-  { dx: 0, dy: -1 },
-];
+const CARDINAL_DX = [1, -1, 0, 0];
+const CARDINAL_DY = [0, 0, 1, -1];
+
+// Reusable module-scoped scratch buffers for zero-allocation BFS and A* pathfinding
+let scratchCapacity = 0;
+let bfsQueue = new Int32Array(0);
+let gScoreBuf = new Float32Array(0);
+let cameFromBuf = new Int32Array(0);
+let gGenBuf = new Uint32Array(0);
+let closedGenBuf = new Uint32Array(0);
+let heapKeys = new Int32Array(0);
+let heapF = new Float32Array(0);
+let pathGeneration = 1;
+
+function ensurePathScratch(totalCells: number): void {
+  if (scratchCapacity < totalCells) {
+    scratchCapacity = totalCells;
+    bfsQueue = new Int32Array(totalCells);
+    gScoreBuf = new Float32Array(totalCells);
+    cameFromBuf = new Int32Array(totalCells);
+    gGenBuf = new Uint32Array(totalCells);
+    closedGenBuf = new Uint32Array(totalCells);
+    heapKeys = new Int32Array(totalCells * 2);
+    heapF = new Float32Array(totalCells * 2);
+    pathGeneration = 1;
+    return;
+  }
+  pathGeneration++;
+  if (pathGeneration >= 0xfffffffe) {
+    gGenBuf.fill(0);
+    closedGenBuf.fill(0);
+    pathGeneration = 1;
+  }
+}
 
 export function inBounds(tx: number, ty: number, gridSize = GRID_SIZE): boolean {
   return tx >= 0 && ty >= 0 && tx < gridSize && ty < gridSize;
@@ -25,24 +53,51 @@ export function isWalkable(state: WorldState, tx: number, ty: number): boolean {
   return kind === 'LAND' || kind === 'BRIDGE';
 }
 
-export function hasStructureAt(state: WorldState, tx: number, ty: number): boolean {
-  return state.structures.some((s) => s.tx === tx && s.ty === ty);
+export function registerStructureOnGrid(state: WorldState, s: Structure): void {
+  const gs = state.gridSize;
+  if (s.tx >= 0 && s.ty >= 0 && s.tx < gs && s.ty < gs) {
+    state.structureGrid[s.ty * gs + s.tx] = s;
+  }
 }
 
-export function getStructureAt(state: WorldState, tx: number, ty: number) {
-  return state.structures.find((s) => s.tx === tx && s.ty === ty) ?? null;
+export function unregisterStructureOnGrid(state: WorldState, tx: number, ty: number, id?: number): void {
+  const gs = state.gridSize;
+  if (tx >= 0 && ty >= 0 && tx < gs && ty < gs) {
+    const idx = ty * gs + tx;
+    const cur = state.structureGrid[idx];
+    if (cur && (id === undefined || cur.id === id)) {
+      state.structureGrid[idx] = null;
+    }
+  }
+}
+
+export function hasStructureAt(state: WorldState, tx: number, ty: number): boolean {
+  const gs = state.gridSize;
+  if (tx < 0 || ty < 0 || tx >= gs || ty >= gs) return false;
+  return state.structureGrid[ty * gs + tx] !== null;
+}
+
+export function getStructureAt(state: WorldState, tx: number, ty: number): Structure | null {
+  const gs = state.gridSize;
+  if (tx < 0 || ty < 0 || tx >= gs || ty >= gs) return null;
+  return state.structureGrid[ty * gs + tx] ?? null;
 }
 
 export function hasGeyserAt(state: WorldState, tx: number, ty: number): boolean {
-  return state.geysers.some((g) => g.tx === tx && g.ty === ty);
+  const gs = state.gridSize;
+  if (tx < 0 || ty < 0 || tx >= gs || ty >= gs) return false;
+  return state.geyserGrid[ty * gs + tx] === 1;
 }
 
 /**
- * Flood-fills Aether power connectivity from each active faction's High Temple
- * across LAND tiles and bridges owned by that faction.
+ * Flood-fills Aether power connectivity from each active faction's High Temple & Outposts
+ * across LAND tiles and bridges owned by that faction (using zero-allocation typed BFS queue).
  */
 export function recomputePowerGrids(state: WorldState): void {
   const gs = state.gridSize;
+  const totalCells = gs * gs;
+  ensurePathScratch(totalCells);
+
   for (let y = 0; y < gs; y++) {
     const row = state.tiles[y];
     for (let x = 0; x < gs; x++) {
@@ -50,53 +105,55 @@ export function recomputePowerGrids(state: WorldState): void {
     }
   }
 
-  const runBfs = (owner: FactionId) => {
+  for (const owner of state.activeFactionIds) {
     const faction = state.factions[owner];
-    if (!faction || faction.eliminated) return;
-    const hubs = state.structures.filter(
-      (s) => (s.kind === 'TEMPLE' || s.kind === 'OUTPOST') && s.owner === owner
-    );
-    if (hubs.length === 0) return;
+    if (!faction || faction.eliminated) continue;
     const bit = getFactionBit(owner);
-    const queue: Array<{ x: number; y: number }> = [];
-    for (const hub of hubs) {
-      if ((state.tiles[hub.ty][hub.tx].poweredMask & bit) === 0) {
-        state.tiles[hub.ty][hub.tx].poweredMask |= bit;
-        queue.push({ x: hub.tx, y: hub.ty });
-      }
-    }
 
     let head = 0;
-    while (head < queue.length) {
-      const cur = queue[head++];
-      for (const d of CARDINAL_DIRS) {
-        const nx = cur.x + d.dx;
-        const ny = cur.y + d.dy;
-        if (!inBounds(nx, ny, gs)) continue;
+    let tail = 0;
+    for (let i = 0; i < state.structures.length; i++) {
+      const s = state.structures[i];
+      if (s.owner !== owner || (s.kind !== 'TEMPLE' && s.kind !== 'OUTPOST')) continue;
+      const tile = state.tiles[s.ty][s.tx];
+      if ((tile.poweredMask & bit) === 0) {
+        tile.poweredMask |= bit;
+        bfsQueue[tail++] = s.ty * gs + s.tx;
+      }
+    }
+    if (tail === 0) continue;
+
+    while (head < tail) {
+      const idx = bfsQueue[head++];
+      const cx = idx % gs;
+      const cy = (idx - cx) / gs;
+      for (let d = 0; d < 4; d++) {
+        const nx = cx + CARDINAL_DX[d];
+        const ny = cy + CARDINAL_DY[d];
+        if (nx < 0 || ny < 0 || nx >= gs || ny >= gs) continue;
         const tile = state.tiles[ny][nx];
         if (tile.kind === 'VOID') continue;
         if (tile.kind === 'BRIDGE' && tile.owner !== owner) continue;
         if ((tile.poweredMask & bit) !== 0) continue;
         tile.poweredMask |= bit;
-        queue.push({ x: nx, y: ny });
+        bfsQueue[tail++] = ny * gs + nx;
       }
     }
-  };
-
-  for (const owner of state.activeFactionIds) {
-    runBfs(owner);
   }
 
   // Update powered state on all structures
-  for (const s of state.structures) {
+  for (let i = 0; i < state.structures.length; i++) {
+    const s = state.structures[i];
     if (s.owner === 'NEUTRAL') {
       s.powered = true;
     } else if (isFactionId(s.owner)) {
-      s.powered = isTilePoweredBy(state, s.tx, s.ty, s.owner);
+      s.powered = (state.tiles[s.ty][s.tx].poweredMask & getFactionBit(s.owner)) !== 0;
     } else {
       s.powered = false;
     }
   }
+
+  state.terrainVersion++;
 }
 
 export function isTilePoweredBy(state: WorldState, tx: number, ty: number, owner: FactionId): boolean {
@@ -106,10 +163,17 @@ export function isTilePoweredBy(state: WorldState, tx: number, ty: number, owner
 }
 
 export function countConnectedIslands(state: WorldState, owner: FactionId): number {
+  const bit = getFactionBit(owner);
   let count = 0;
-  for (const island of state.islands) {
-    const connected = island.tiles.some((pt) => isTilePoweredBy(state, pt.x, pt.y, owner));
-    if (connected) count++;
+  for (let i = 0; i < state.islands.length; i++) {
+    const tiles = state.islands[i].tiles;
+    for (let j = 0; j < tiles.length; j++) {
+      const pt = tiles[j];
+      if ((state.tiles[pt.y][pt.x].poweredMask & bit) !== 0) {
+        count++;
+        break;
+      }
+    }
   }
   return count;
 }
@@ -138,21 +202,27 @@ export function canPlaceBridge(
   anchorTy: number
 ): { valid: boolean; cells: Array<{ x: number; y: number }>; reason?: string } {
   const cells = getBridgePlacementCells(pieceKey, rotation, anchorTx, anchorTy);
+  const gs = state.gridSize;
+  const bit = getFactionBit(owner);
   let touchesPowered = false;
 
-  for (const cell of cells) {
-    if (!inBounds(cell.x, cell.y, state.gridSize)) {
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
+    if (cell.x < 0 || cell.y < 0 || cell.x >= gs || cell.y >= gs) {
       return { valid: false, cells, reason: 'Out of sky bounds' };
     }
     const tile = state.tiles[cell.y][cell.x];
     if (tile.kind !== 'VOID') {
       return { valid: false, cells, reason: 'Must span open sky' };
     }
-    for (const d of CARDINAL_DIRS) {
-      const nx = cell.x + d.dx;
-      const ny = cell.y + d.dy;
-      if (isTilePoweredBy(state, nx, ny, owner)) {
-        touchesPowered = true;
+    if (!touchesPowered) {
+      for (let d = 0; d < 4; d++) {
+        const nx = cell.x + CARDINAL_DX[d];
+        const ny = cell.y + CARDINAL_DY[d];
+        if (nx >= 0 && ny >= 0 && nx < gs && ny < gs && (state.tiles[ny][nx].poweredMask & bit) !== 0) {
+          touchesPowered = true;
+          break;
+        }
       }
     }
   }
@@ -187,8 +257,8 @@ export function canPlaceStructure(
 }
 
 /**
- * Fast A* tile pathfinder across walkable tiles (LAND + any intact BRIDGE).
- * Avoids tiles blocked by impassable enemy structures unless it's the goal.
+ * Fast zero-allocation binary-heap A* tile pathfinder across walkable tiles (LAND + intact BRIDGE).
+ * Uses generation-stamped typed scratch buffers and O(1) structureGrid occupancy checks.
  */
 export function findTilePath(
   state: WorldState,
@@ -209,72 +279,116 @@ export function findTilePath(
   if (!isWalkable(state, sx, sy) || !isWalkable(state, gx, gy)) return null;
   if (sx === gx && sy === gy) return [{ x: gx, y: gy }];
 
-  const key = (x: number, y: number) => y * gs + x;
   const totalCells = gs * gs;
-  const gScore = new Float32Array(totalCells);
-  gScore.fill(1e9);
-  const cameFrom = new Int32Array(totalCells);
-  cameFrom.fill(-1);
-  const closed = new Uint8Array(totalCells);
+  ensurePathScratch(totalCells);
+  const gen = pathGeneration;
+  const structureGrid = state.structureGrid;
 
-  // Build quick occupancy set for structures (still allow walking on start/goal/temple/altar/mines)
-  const blocked = new Uint8Array(totalCells);
-  for (const s of state.structures) {
-    if (s.kind !== 'TEMPLE' && s.kind !== 'ALTAR' && s.kind !== 'BRIDGE_MINE') {
-      blocked[key(s.tx, s.ty)] = 1;
-    }
-  }
-  blocked[key(sx, sy)] = 0;
-  blocked[key(gx, gy)] = 0;
+  const startKey = sy * gs + sx;
+  const goalKey = gy * gs + gx;
+  gScoreBuf[startKey] = 0;
+  gGenBuf[startKey] = gen;
+  cameFromBuf[startKey] = -1;
 
-  const open: Array<{ x: number; y: number; f: number }> = [];
-  const startKey = key(sx, sy);
-  gScore[startKey] = 0;
-  open.push({ x: sx, y: sy, f: Math.abs(gx - sx) + Math.abs(gy - sy) });
+  // Binary min-heap open set
+  let heapSize = 1;
+  heapKeys[0] = startKey;
+  heapF[0] = Math.abs(gx - sx) + Math.abs(gy - sy);
 
   let explored = 0;
-  while (open.length > 0 && explored < exploreBudget) {
-    // Pop lowest f
-    let bestIdx = 0;
-    for (let i = 1; i < open.length; i++) {
-      if (open[i].f < open[bestIdx].f) bestIdx = i;
+  while (heapSize > 0 && explored < exploreBudget) {
+    // Pop min-f node
+    const ck = heapKeys[0];
+    heapSize--;
+    if (heapSize > 0) {
+      const lastKey = heapKeys[heapSize];
+      const lastF = heapF[heapSize];
+      let idx = 0;
+      while (true) {
+        const left = (idx << 1) + 1;
+        if (left >= heapSize) break;
+        const right = left + 1;
+        let smallest = left;
+        if (right < heapSize && heapF[right] < heapF[left]) {
+          smallest = right;
+        }
+        if (lastF <= heapF[smallest]) break;
+        heapKeys[idx] = heapKeys[smallest];
+        heapF[idx] = heapF[smallest];
+        idx = smallest;
+      }
+      heapKeys[idx] = lastKey;
+      heapF[idx] = lastF;
     }
-    const cur = open[bestIdx];
-    open[bestIdx] = open[open.length - 1];
-    open.pop();
 
-    const ck = key(cur.x, cur.y);
-    if (closed[ck]) continue;
-    closed[ck] = 1;
+    if (closedGenBuf[ck] === gen) continue;
+    closedGenBuf[ck] = gen;
     explored++;
 
-    if (cur.x === gx && cur.y === gy) {
+    if (ck === goalKey) {
       const path: Array<{ x: number; y: number }> = [];
       let trace = ck;
       while (trace !== -1 && trace !== startKey) {
         const px = trace % gs;
-        const py = Math.floor(trace / gs);
+        const py = (trace - px) / gs;
         path.push({ x: px, y: py });
-        trace = cameFrom[trace];
+        trace = cameFromBuf[trace];
       }
       path.reverse();
       return path;
     }
 
-    for (const d of CARDINAL_DIRS) {
-      const nx = cur.x + d.dx;
-      const ny = cur.y + d.dy;
-      if (!isWalkable(state, nx, ny)) continue;
-      const nk = key(nx, ny);
-      if (closed[nk]) continue;
-      // Soft penalty for stepping through a structure tile (allows squeezing around bridges when needed)
-      const stepCost = blocked[nk] ? 6.0 : 1.0;
-      const tentativeG = gScore[ck] + stepCost;
-      if (tentativeG < gScore[nk]) {
-        cameFrom[nk] = ck;
-        gScore[nk] = tentativeG;
-        const h = Math.abs(gx - nx) + Math.abs(gy - ny);
-        open.push({ x: nx, y: ny, f: tentativeG + h });
+    const cx = ck % gs;
+    const cy = (ck - cx) / gs;
+    const curG = gScoreBuf[ck];
+
+    for (let d = 0; d < 4; d++) {
+      const nx = cx + CARDINAL_DX[d];
+      const ny = cy + CARDINAL_DY[d];
+      if (nx < 0 || ny < 0 || nx >= gs || ny >= gs) continue;
+      const tileKind = state.tiles[ny][nx].kind;
+      if (tileKind === 'VOID') continue;
+
+      const nk = ny * gs + nx;
+      if (closedGenBuf[nk] === gen) continue;
+
+      // Soft penalty for stepping through impassable structures (allow start/goal/temple/altar/mine)
+      let stepCost = 1.0;
+      if (nk !== startKey && nk !== goalKey) {
+        const occ = structureGrid[nk];
+        if (occ !== null && occ.kind !== 'TEMPLE' && occ.kind !== 'ALTAR' && occ.kind !== 'BRIDGE_MINE') {
+          stepCost = 6.0;
+        }
+      }
+
+      const tentativeG = curG + stepCost;
+      if (gGenBuf[nk] !== gen || tentativeG < gScoreBuf[nk]) {
+        gGenBuf[nk] = gen;
+        gScoreBuf[nk] = tentativeG;
+        cameFromBuf[nk] = ck;
+        const f = tentativeG + Math.abs(gx - nx) + Math.abs(gy - ny);
+
+        // Ensure heap capacity if a pathological search pushes extra entries
+        if (heapSize >= heapKeys.length) {
+          const nextKeys = new Int32Array(heapKeys.length * 2);
+          nextKeys.set(heapKeys);
+          heapKeys = nextKeys;
+          const nextF = new Float32Array(heapF.length * 2);
+          nextF.set(heapF);
+          heapF = nextF;
+        }
+
+        // Push to binary min-heap
+        let idx = heapSize++;
+        while (idx > 0) {
+          const parent = (idx - 1) >> 1;
+          if (f >= heapF[parent]) break;
+          heapKeys[idx] = heapKeys[parent];
+          heapF[idx] = heapF[parent];
+          idx = parent;
+        }
+        heapKeys[idx] = nk;
+        heapF[idx] = f;
       }
     }
   }

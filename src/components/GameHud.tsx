@@ -92,7 +92,7 @@ function formatClock(totalSeconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-export function GameHud({
+export const GameHud = React.memo(function GameHud({
   hud,
   onBindMinimap,
   onMinimapClick,
@@ -1663,4 +1663,4 @@ export function GameHud({
       </div>
     </div>
   );
-}
+});

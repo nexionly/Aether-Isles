@@ -180,6 +180,7 @@ export class WebAudioManager {
   private musicTickId: number | null = null;
   private musicPendingUnlock = false;
   private transitioningOutro = false;
+  private pageHidden = false;
   private trackListeners = new Set<() => void>();
 
   constructor() {
@@ -324,7 +325,7 @@ export class WebAudioManager {
   }
 
   private getTargetMusicVolume(): number {
-    if (this.muted || this.musicVolume <= 0.001) return 0;
+    if (this.pageHidden || this.muted || this.musicVolume <= 0.001) return 0;
     const duckFactor = this.musicDucked && this.musicMode !== 'CREDITS' ? 0.48 : 1;
     return Math.min(1, this.musicVolume * duckFactor * MUSIC_HEADROOM);
   }
@@ -477,6 +478,50 @@ export class WebAudioManager {
       ) {
         this.transitioningOutro = true;
         this.handleTrackCompleted();
+      }
+    }
+
+    // Stop the 40ms fade interval when idle (hidden, muted, or paused with no fades running) to save battery
+    const activeIdle = !active || (active.paused && this.getTargetMusicVolume() <= 0.001);
+    if (this.fadingMusicEls.length === 0 && activeIdle && this.musicTickId !== null && typeof window !== 'undefined') {
+      window.clearInterval(this.musicTickId);
+      this.musicTickId = null;
+    }
+  }
+
+  /**
+   * Suspends Web Audio & music timers while the browser tab is hidden to save battery,
+   * and resumes cleanly when the player returns.
+   */
+  public setPageHidden(hidden: boolean): void {
+    if (this.pageHidden === hidden) return;
+    this.pageHidden = hidden;
+
+    if (hidden) {
+      if (this.ctx && this.ctx.state === 'running') {
+        this.ctx.suspend().catch(() => {});
+      }
+      if (this.activeMusicEl && !this.activeMusicEl.paused) {
+        this.activeMusicEl.pause();
+      }
+      for (const item of this.fadingMusicEls) {
+        item.el.pause();
+      }
+      if (this.musicTickId !== null && typeof window !== 'undefined') {
+        window.clearInterval(this.musicTickId);
+        this.musicTickId = null;
+      }
+    } else {
+      if (this.ctx && this.ctx.state === 'suspended' && !this.muted) {
+        this.ctx.resume().then(() => {
+          this.syncMasterGain();
+          this.syncSfxGain();
+          this.syncAmbience();
+        }).catch(() => {});
+      }
+      if (!this.muted && this.musicVolume > 0.001) {
+        this.ensureActiveMusicStarted();
+        this.ensureMusicLoopRunning();
       }
     }
   }
