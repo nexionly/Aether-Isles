@@ -41,7 +41,9 @@ import type {
   TechUnlockOption,
   Tile,
   VictoryRules,
+  WeatherState,
 } from './types';
+import { createInitialWeatherState } from './weather';
 
 export interface WorldState {
   gridSize: number;
@@ -72,6 +74,7 @@ export interface WorldState {
   difficulty: Difficulty;
   elapsedSeconds: number;
   nextEntityId: number;
+  weather: WeatherState;
 }
 
 export function tileToIso(tx: number, ty: number): { x: number; y: number } {
@@ -1063,6 +1066,7 @@ export function createInitialWorld(
     difficulty,
     elapsedSeconds: 0,
     nextEntityId: nextId,
+    weather: createInitialWeatherState(),
   };
 
   recomputePowerGrids(state);

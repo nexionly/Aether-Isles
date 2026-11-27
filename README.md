@@ -7,9 +7,11 @@
 **A 2D isometric sky-island real-time strategy game inspired by classic *NetStorm: Islands at War*.**  
 Build polyomino sky-bridges across open void, harvest Aether Crystals, command Wind, Rain, and Thunder fortifications, launch flying Sky Fleets, and perform Altar Rituals to claim the archipelago.
 
-[![Play in Browser](https://img.shields.io/badge/Play-GitHub%20Pages-f0b429?style=for-the-badge&logo=githubpages&logoColor=11263f)](../../deployments/github-pages)
+[![Play Online](https://img.shields.io/badge/Play%20Online-aether--isles.ai.studio-f0b429?style=for-the-badge)](https://aether-isles.ai.studio)
 [![PWA Ready](https://img.shields.io/badge/PWA-Installable%20Offline-2dd4bf?style=for-the-badge)](./vite.config.ts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-38bdf8?style=for-the-badge)](./LICENSE)
+
+**Play online in your browser:** [https://aether-isles.ai.studio](https://aether-isles.ai.studio)
 
 </div>
 
@@ -49,6 +51,7 @@ Launch airborne units directly from the **Sky Fleet** dock tab to fly freely ove
 ### Customizable Skirmishes & Optional Fog of War
 - Battle **1 to 6 AI opponents** across dynamically scaled archipelagos with three locked difficulty tiers (**Initiate**, **Archon**, **Stormlord**).
 - Toggle **Optional Fog of War & Scouting**, **Temple Siege**, **Sacred Site Dominance**, and **Aether Overload** victory rules right from the title screen or in-game Rules menu.
+- Features a dynamic visual weather cycle transitioning across calm golden-hour skies, light rain with isometric surface ripples, and localized drifting thunderstorm cells with forked lightning.
 - Includes a full original soundtrack, spatial Web Audio combat SFX, and full **Progressive Web App (PWA)** offline support for desktop and mobile installation.
 
 ---
@@ -73,9 +76,11 @@ Launch airborne units directly from the **Sky Fleet** dock tab to fly freely ove
 
 ---
 
-## Running Locally
+## Play Online & Running Locally
 
-Requires **Node.js 20+** and **npm**:
+Play instantly in your browser—no installation required—at **[https://aether-isles.ai.studio](https://aether-isles.ai.studio)**.
+
+To run locally, requires **Node.js 20+** and **npm**:
 
 ```bash
 npm install

@@ -442,6 +442,63 @@ export interface VictoryCelebrationState {
   rings: VictoryCelebrationRing[];
 }
 
+export type WeatherPhase = 'CALM' | 'LIGHT_RAIN' | 'THUNDERSTORM';
+
+export interface WorldLightningBolt {
+  points: Array<{ x: number; y: number }>;
+  branches: Array<Array<{ x: number; y: number }>>;
+  impactX: number;
+  impactY: number;
+  life: number;
+  maxLife: number;
+  hue: 'GOLD' | 'CYAN' | 'VIOLET';
+}
+
+export interface StormCell {
+  id: number;
+  isoX: number;
+  isoY: number;
+  vx: number;
+  vy: number;
+  radiusIso: number;
+  age: number;
+  maxAge: number;
+  intensity: number; // 0..1 smooth envelope
+  lightningCooldown: number;
+  flash: number; // 0..1 localized cloud & ground illumination
+  bolts: WorldLightningBolt[];
+  seed: number;
+}
+
+export interface WeatherState {
+  phase: WeatherPhase;
+  nextPhase: WeatherPhase;
+  phaseElapsed: number;
+  phaseDuration: number;
+  /** Smoothly interpolated atmospheric weights (0..1) */
+  overcast: number;
+  rainIntensity: number;
+  stormIntensity: number;
+  windStrength: number;
+  sunVisibility: number;
+  /** Subtle viewport ambient sheet-lightning flash (0..1) */
+  globalFlash: number;
+  /** Active localized thunderstorm cells roaming across the isometric map */
+  cells: StormCell[];
+  nextCellId: number;
+  /** Accumulated rain/wind drift clock (independent of abrupt speed jumps) */
+  driftTime: number;
+}
+
+export interface WeatherHudSummary {
+  phase: WeatherPhase;
+  label: string;
+  rainIntensity: number;
+  stormIntensity: number;
+  activeStormCells: number;
+}
+
+
 export interface FactionState {
   owner: FactionId;
   label: string;
@@ -646,4 +703,5 @@ export interface HudSnapshot {
     description: string;
   }>;
   playerPriestShieldTimer: number;
+  weather: WeatherHudSummary;
 }

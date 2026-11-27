@@ -36,7 +36,9 @@ import type {
   VictoryCelebrationParticle,
   VictoryCelebrationRing,
   VictoryCelebrationState,
+  WeatherState,
 } from './types';
+import { getLocalizedStormFactorAtIso } from './weather';
 import { isoToTile, tileToIso, type WorldState } from './worldGen';
 
 export interface CameraState {
@@ -331,16 +333,22 @@ export function renderWorld(
   const playerColor = FURY_META[state.factions.PLAYER.fury].color;
   const gs = state.gridSize;
 
-  // 1. Cached Dual Sunlit Golden-Hour Sky & Eastern Rolling Storm Front
+  // 1. Cached Dual Sunlit Golden-Hour Sky & Dynamic Weather Atmospheric Mood
   const playerFury = state.factions.PLAYER.fury;
+  const weather = state.weather;
   const skyCanvas = getSkyBackdropCanvas(width, height, playerFury);
   ctx.drawImage(skyCanvas, 0, 0, width, height);
 
-  // Angled volumetric golden sunbeams streaming across the sunlit sky (cached offscreen)
-  drawVolumetricSunbeams(ctx, width, height, time);
+  // Smooth weather overcast & storm sky tint + subtle sheet-lightning sky brightening
+  if (weather.overcast > 0.01 || weather.globalFlash > 0.01) {
+    drawWeatherSkyAtmosphere(ctx, width, height, weather);
+  }
+
+  // Angled volumetric golden sunbeams streaming across the sunlit sky (dims smoothly under rain/storms)
+  drawVolumetricSunbeams(ctx, width, height, time, weather.sunVisibility);
 
   // Periodic branching golden storm lightning crackling in the eastern thunderhead
-  drawEasternStormFront(ctx, width, height, time, playerFury);
+  drawEasternStormFront(ctx, width, height, time, playerFury, weather.stormIntensity);
 
   // 2. World Camera Transform
   ctx.save();
@@ -348,11 +356,11 @@ export function renderWorld(
   ctx.scale(camera.zoom, camera.zoom);
   ctx.translate(-camera.x + camera.shakeX, -camera.y + camera.shakeY);
 
-  // Deep Abyss Layer: Culled Sunlit Cumulus / Eastern Thunderclouds + Distant Floating Islets + Soaring Sky-Birds
-  drawParallaxClouds(ctx, atlas, time, camera, width, height, 0);
+  // Deep Abyss Layer: Culled Sunlit Cumulus / Weather-Reactive Storm Clouds + Distant Floating Islets + Soaring Sky-Birds
+  drawParallaxClouds(ctx, atlas, time, camera, width, height, 0, weather);
   drawDistantIslets(ctx, atlas, time, camera, width, height);
-  drawSkyBirds(ctx, time, camera, width);
-  drawParallaxClouds(ctx, atlas, time, camera, width, height, 1);
+  drawSkyBirds(ctx, time, camera, width, weather.sunVisibility);
+  drawParallaxClouds(ctx, atlas, time, camera, width, height, 1, weather);
 
   // Compute visible world bounds for culling
   const pad = 260 / camera.zoom;
@@ -427,8 +435,14 @@ export function renderWorld(
     }
   }
 
-  // 3b. Drifting Soft Cloud Shadows Gliding Across the Archipelago
-  drawCloudShadows(ctx, atlas, state, minIsoX, maxIsoX, minIsoY, maxIsoY, time);
+  // 3b. Drifting Soft Cloud Shadows & Localized Storm Cell Ground Shadows + Isometric Rain Ripples
+  drawCloudShadows(ctx, atlas, state, minIsoX, maxIsoX, minIsoY, maxIsoY, time, weather);
+  if (weather.cells.length > 0) {
+    drawLocalizedStormGroundShadows(ctx, atlas, weather, minIsoX, maxIsoX, minIsoY, maxIsoY);
+  }
+  if (weather.rainIntensity > 0.08 || weather.cells.length > 0) {
+    drawIsometricRainSplashes(ctx, state, minTx, maxTx, minTy, maxTy, weather, time);
+  }
 
   // 4. Sacred Temple Site Sanctuary Rings (Altar Dominance sites on Citadel & Shrines)
   drawSacredSiteRings(ctx, state, minIsoX, maxIsoX, minIsoY, maxIsoY, time);
@@ -677,11 +691,19 @@ export function renderWorld(
   }
   ctx.globalAlpha = 1;
 
+  // 7c. Localized Drifting Thunderstorm Cells (Rain Curtains, World-Space Forked Lightning & Storm Canopy)
+  if (weather.cells.length > 0) {
+    drawLocalizedStormCells(ctx, atlas, weather, minIsoX, maxIsoX, minIsoY, maxIsoY, time);
+  }
+
   // High-altitude wispy foreground clouds & drifting golden sunlit lantern motes
-  drawParallaxClouds(ctx, atlas, time, camera, width, height, 2);
-  drawAmbientSkyMotes(ctx, time, camera, width, height);
+  drawParallaxClouds(ctx, atlas, time, camera, width, height, 2, weather);
+  drawAmbientSkyMotes(ctx, time, camera, width, height, weather.sunVisibility);
 
   ctx.restore();
+
+  // 7d. Screen-Space Batched Rainfall, Wind-Swept Mist & Sheet-Lightning Atmosphere
+  drawWeatherScreenOverlay(ctx, width, height, weather, camera, time);
 
   // 8. Screen-Space Victory Celebration Particle & Sigil Overlay (Aether Collection vs Altar Ritual)
   if (info.victoryCelebration) {
@@ -1229,14 +1251,44 @@ function drawSacredSiteRings(
   }
 }
 
+function drawWeatherSkyAtmosphere(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  weather: WeatherState
+): void {
+  if (weather.overcast > 0.01) {
+    // Cool steel-slate sky darkening as rain and storm clouds gather
+    const alpha = Math.min(0.5, weather.overcast * 0.4 + weather.stormIntensity * 0.14);
+    ctx.fillStyle = `rgba(18, 30, 50, ${alpha.toFixed(3)})`;
+    ctx.fillRect(0, 0, width, height);
+
+    if (weather.stormIntensity > 0.06) {
+      // Brooding upper sky storm-band gradient
+      const topGrad = ctx.createLinearGradient(0, 0, 0, height * 0.55);
+      topGrad.addColorStop(0, `rgba(12, 20, 36, ${(weather.stormIntensity * 0.34).toFixed(3)})`);
+      topGrad.addColorStop(1, 'rgba(12, 20, 36, 0)');
+      ctx.fillStyle = topGrad;
+      ctx.fillRect(0, 0, width, height * 0.55);
+    }
+  }
+
+  if (weather.globalFlash > 0.01) {
+    ctx.fillStyle = `rgba(214, 234, 255, ${(weather.globalFlash * 0.15).toFixed(3)})`;
+    ctx.fillRect(0, 0, width, height);
+  }
+}
+
 function drawVolumetricSunbeams(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  time: number
+  time: number,
+  sunVisibility: number
 ): void {
+  if (sunVisibility <= 0.03) return;
   const cached = getSunbeamCanvas(width, height);
-  const shimmer = 0.78 + 0.22 * Math.sin(time * 0.45);
+  const shimmer = (0.78 + 0.22 * Math.sin(time * 0.45)) * sunVisibility;
   ctx.save();
   ctx.globalAlpha = shimmer;
   ctx.drawImage(cached, 0, 0, width, height);
@@ -1248,19 +1300,21 @@ function drawEasternStormFront(
   width: number,
   height: number,
   time: number,
-  playerFury: 'WIND' | 'RAIN' | 'THUNDER'
+  playerFury: 'WIND' | 'RAIN' | 'THUNDER',
+  stormIntensity: number
 ): void {
   // Periodic branching golden-amber lightning forks crackling in the eastern thunderclouds
   const cyclePeriod = playerFury === 'THUNDER' ? 4.4 : 6.2;
   const cycleIdx = Math.floor(time / cyclePeriod);
   const localT = (time % cyclePeriod) / cyclePeriod;
-  const flashEnv =
+  const rawFlashEnv =
     localT < 0.065
       ? Math.sin((localT / 0.065) * Math.PI)
       : localT > 0.085 && localT < 0.13
         ? Math.sin(((localT - 0.085) / 0.045) * Math.PI) * 0.72
         : 0;
 
+  const flashEnv = rawFlashEnv * (0.48 + stormIntensity * 0.65);
   if (flashEnv <= 0.02) return;
 
   const anchorX = width * (0.76 + ((cycleIdx * 37) % 18) * 0.01);
@@ -1324,7 +1378,8 @@ function drawParallaxClouds(
   camera: CameraState,
   viewW: number,
   viewH: number,
-  layer: number
+  layer: number,
+  weather: WeatherState
 ): void {
   const parallax = layer === 0 ? 0.28 : layer === 1 ? 0.52 : 1.15;
   const invZoom = 1 / Math.max(0.35, camera.zoom);
@@ -1336,7 +1391,8 @@ function drawParallaxClouds(
   ctx.save();
   ctx.translate(camera.x * (1 - parallax), camera.y * (1 - parallax));
 
-  for (const c of CLOUDS) {
+  for (let i = 0; i < CLOUDS.length; i++) {
+    const c = CLOUDS[i];
     if (c.layer !== layer) continue;
     const cx = ((c.x + time * c.speed + 2800) % 5200) - 2600;
     const cy = c.y;
@@ -1352,17 +1408,37 @@ function drawParallaxClouds(
       continue;
     }
 
-    // Position relative to viewport horizontal center decides sunlit cumulus vs eastern storm front
+    // Smoothly crossfade from sunlit cumulus to brooding storm clouds as overcast deepens
     const relScreenX = cx - visCenterX;
     const isEasternStorm = layer !== 2 && relScreenX > halfWorldW * 0.14;
-    const sprite = isEasternStorm
-      ? atlas.stormClouds[c.spriteIdx % atlas.stormClouds.length]
-      : atlas.sunlitClouds[c.spriteIdx % atlas.sunlitClouds.length];
+    const cloudOrder = ((i * 37) % 100) / 100;
+    const stormBlend = isEasternStorm
+      ? 1
+      : Math.max(0, Math.min(1, (weather.overcast * 1.15 - cloudOrder * 0.72) * 2.2));
 
-    const w = sprite.width * c.scale;
-    const h = sprite.height * c.scale;
-    ctx.globalAlpha = layer === 2 ? 0.13 : isEasternStorm ? Math.min(0.88, c.alpha + 0.12) : c.alpha;
-    ctx.drawImage(sprite, cx - w * 0.5, cy - h * 0.5, w, h);
+    const sunSprite = atlas.sunlitClouds[c.spriteIdx % atlas.sunlitClouds.length];
+    const stormSprite = atlas.stormClouds[c.spriteIdx % atlas.stormClouds.length];
+    const w = sunSprite.width * c.scale;
+    const h = sunSprite.height * c.scale;
+    const baseAlpha =
+      layer === 2
+        ? 0.13 + weather.overcast * 0.11
+        : isEasternStorm
+          ? Math.min(0.9, c.alpha + 0.12)
+          : c.alpha + weather.overcast * 0.08;
+
+    if (stormBlend <= 0.02) {
+      ctx.globalAlpha = baseAlpha;
+      ctx.drawImage(sunSprite, cx - w * 0.5, cy - h * 0.5, w, h);
+    } else if (stormBlend >= 0.98) {
+      ctx.globalAlpha = Math.min(0.92, baseAlpha + (layer === 2 ? 0.04 : 0.08));
+      ctx.drawImage(stormSprite, cx - w * 0.5, cy - h * 0.5, w, h);
+    } else {
+      ctx.globalAlpha = baseAlpha * (1 - stormBlend);
+      ctx.drawImage(sunSprite, cx - w * 0.5, cy - h * 0.5, w, h);
+      ctx.globalAlpha = Math.min(0.92, baseAlpha + 0.06) * stormBlend;
+      ctx.drawImage(stormSprite, cx - w * 0.5, cy - h * 0.5, w, h);
+    }
   }
   ctx.globalAlpha = 1;
   ctx.restore();
@@ -4839,12 +4915,16 @@ function drawCloudShadows(
   maxIsoX: number,
   minIsoY: number,
   maxIsoY: number,
-  time: number
+  time: number,
+  weather: WeatherState
 ): void {
   const bounds = getWorldIsoBounds(state.gridSize);
   const spanX = Math.max(1200, bounds.maxX - bounds.minX + 600);
   const spanY = Math.max(700, bounds.maxY - bounds.minY + 400);
+  const shadowAlpha = Math.min(1, 0.85 + weather.overcast * 0.35);
 
+  ctx.save();
+  ctx.globalAlpha = shadowAlpha;
   for (let i = 0; i < 6; i++) {
     const rawX = ((i * 530 + time * (11 + (i % 3) * 4)) % spanX) + bounds.minX - 300;
     const rawY = bounds.minY + ((i * 230 + 140) % spanY);
@@ -4859,17 +4939,381 @@ function drawCloudShadows(
     ctx.drawImage(atlas.cloudShadow, -rx, -ry, rx * 2, ry * 2);
     ctx.restore();
   }
+  ctx.restore();
+}
+
+function drawLocalizedStormGroundShadows(
+  ctx: CanvasRenderingContext2D,
+  atlas: SpriteAtlas,
+  weather: WeatherState,
+  minIsoX: number,
+  maxIsoX: number,
+  minIsoY: number,
+  maxIsoY: number
+): void {
+  ctx.save();
+  for (const cell of weather.cells) {
+    if (cell.intensity <= 0.02) continue;
+    const rx = cell.radiusIso * 1.12;
+    const ry = cell.radiusIso * 0.62;
+    if (
+      cell.isoX + rx < minIsoX ||
+      cell.isoX - rx > maxIsoX ||
+      cell.isoY + ry < minIsoY ||
+      cell.isoY - ry > maxIsoY
+    ) {
+      continue;
+    }
+
+    // Layered brooding shadow cast onto islands beneath the drifting thunderhead
+    ctx.globalAlpha = Math.min(0.9, cell.intensity * 0.68);
+    ctx.drawImage(atlas.cloudShadow, cell.isoX - rx, cell.isoY - ry, rx * 2, ry * 2);
+    ctx.globalAlpha = Math.min(0.65, cell.intensity * 0.44);
+    ctx.drawImage(
+      atlas.cloudShadow,
+      cell.isoX - rx * 0.72,
+      cell.isoY - ry * 0.72,
+      rx * 1.44,
+      ry * 1.44
+    );
+
+    // Localized terrain flash illumination whenever this cell discharges lightning
+    if (cell.flash > 0.03) {
+      const flashR = cell.radiusIso * 0.85;
+      const grad = ctx.createRadialGradient(
+        cell.isoX,
+        cell.isoY,
+        12,
+        cell.isoX,
+        cell.isoY,
+        flashR
+      );
+      grad.addColorStop(0, `rgba(205, 232, 255, ${(cell.flash * 0.28).toFixed(3)})`);
+      grad.addColorStop(0.55, `rgba(147, 197, 253, ${(cell.flash * 0.11).toFixed(3)})`);
+      grad.addColorStop(1, 'rgba(147, 197, 253, 0)');
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(cell.isoX, cell.isoY, flashR, flashR * 0.54, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawIsometricRainSplashes(
+  ctx: CanvasRenderingContext2D,
+  state: WorldState,
+  minTx: number,
+  maxTx: number,
+  minTy: number,
+  maxTy: number,
+  weather: WeatherState,
+  time: number
+): void {
+  // Lightweight deterministic raindrop splash rings on visible LAND and BRIDGE tiles
+  const spanX = Math.max(1, maxTx - minTx + 1);
+  const spanY = Math.max(1, maxTy - minTy + 1);
+  const stride = Math.max(1, Math.floor(Math.sqrt((spanX * spanY) / 140)));
+
+  ctx.save();
+  ctx.lineWidth = 1.1;
+  let drawn = 0;
+  const maxRipples = 44;
+
+  for (let ty = minTy; ty <= maxTy && drawn < maxRipples; ty += stride) {
+    for (let tx = minTx; tx <= maxTx && drawn < maxRipples; tx += stride) {
+      const tile = state.tiles[ty][tx];
+      if (tile.kind === 'VOID') continue;
+
+      const pos = tileToIso(tx, ty);
+      const localStorm = getLocalizedStormFactorAtIso(weather, pos.x, pos.y);
+      const effectiveRain = Math.min(1, weather.rainIntensity + localStorm * 0.65);
+      if (effectiveRain < 0.08) continue;
+
+      const hash = ((tx * 73856093) ^ (ty * 19349663)) >>> 0;
+      const threshold = effectiveRain * 0.42;
+      const slot = (hash % 1000) / 1000;
+      if (slot > threshold) continue;
+
+      const rate = 1.65 + (hash % 7) * 0.18 + localStorm * 0.65;
+      const phase = (time * rate + slot * 13.7) % 1;
+      if (phase > 0.62) continue;
+
+      const p = phase / 0.62;
+      const offX = (((hash >> 5) % 23) - 11) * 1.15;
+      const offY = (((hash >> 11) % 13) - 6) * 1.05;
+      const rx = 2.4 + p * (7.2 + localStorm * 2.5);
+      const ry = rx * 0.5;
+      const alpha = (1 - p) * (0.28 + effectiveRain * 0.28);
+
+      ctx.strokeStyle =
+        localStorm > 0.25
+          ? `rgba(202, 232, 255, ${alpha.toFixed(3)})`
+          : `rgba(186, 224, 248, ${alpha.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.ellipse(pos.x + offX, pos.y + offY, rx, ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      drawn++;
+    }
+  }
+  ctx.restore();
+}
+
+function drawLocalizedStormCells(
+  ctx: CanvasRenderingContext2D,
+  atlas: SpriteAtlas,
+  weather: WeatherState,
+  minIsoX: number,
+  maxIsoX: number,
+  minIsoY: number,
+  maxIsoY: number,
+  time: number
+): void {
+  ctx.save();
+  const windSlant = 34 + weather.windStrength * 36;
+
+  for (const cell of weather.cells) {
+    if (cell.intensity <= 0.02) continue;
+    const pad = cell.radiusIso + 240;
+    if (
+      cell.isoX + pad < minIsoX ||
+      cell.isoX - pad > maxIsoX ||
+      cell.isoY + pad < minIsoY ||
+      cell.isoY - pad - 240 > maxIsoY
+    ) {
+      continue;
+    }
+
+    // 1. Localized Downpour Rain Curtain falling directly beneath this storm cell (single batched stroke)
+    const dropCount = Math.floor(28 + cell.intensity * 36);
+    ctx.strokeStyle = `rgba(186, 222, 248, ${(0.18 + cell.intensity * 0.24).toFixed(3)})`;
+    ctx.lineWidth = 1.15;
+    ctx.beginPath();
+    for (let i = 0; i < dropCount; i++) {
+      const h1 = Math.sin(cell.seed + i * 12.9898) * 43758.5453;
+      const f1 = h1 - Math.floor(h1);
+      const h2 = Math.sin(cell.seed * 1.37 + i * 78.233) * 24634.6345;
+      const f2 = h2 - Math.floor(h2);
+
+      const angle = f1 * Math.PI * 2;
+      const rad = Math.sqrt(f2) * cell.radiusIso * 0.86;
+      const groundX = cell.isoX + Math.cos(angle) * rad;
+      const groundY = cell.isoY + Math.sin(angle) * rad * 0.5;
+
+      const fallProgress = (time * (1.8 + (i % 5) * 0.22) + f1 * 5.3 + f2 * 3.1) % 1;
+      const topX = groundX - windSlant;
+      const topY = groundY - 210;
+      const headX = topX + (groundX - topX) * fallProgress;
+      const headY = topY + (groundY - topY) * fallProgress;
+      const streakFrac = 0.13 + (i % 3) * 0.03;
+      const tailX = headX - (groundX - topX) * streakFrac;
+      const tailY = headY - (groundY - topY) * streakFrac;
+
+      ctx.moveTo(tailX, tailY);
+      ctx.lineTo(headX, headY);
+    }
+    ctx.stroke();
+
+    // 2. World-Space Forked Lightning Bolts discharging from the storm canopy
+    for (const bolt of cell.bolts) {
+      const ratio = Math.max(0, bolt.life / bolt.maxLife);
+      const flicker = ratio > 0.72 ? 1 : ratio * (0.72 + 0.28 * Math.sin(time * 95 + cell.seed));
+      const glowColor =
+        bolt.hue === 'GOLD'
+          ? `rgba(251, 191, 36, ${(flicker * 0.78).toFixed(3)})`
+          : bolt.hue === 'VIOLET'
+            ? `rgba(192, 132, 252, ${(flicker * 0.78).toFixed(3)})`
+            : `rgba(103, 232, 249, ${(flicker * 0.78).toFixed(3)})`;
+      const coreColor = `rgba(248, 252, 255, ${(flicker * 0.96).toFixed(3)})`;
+
+      // Impact ring where the bolt meets the island / cloud sea
+      const ringR = 14 + (1 - ratio) * 34;
+      ctx.strokeStyle = glowColor;
+      ctx.lineWidth = 2.2 * ratio + 0.6;
+      ctx.beginPath();
+      ctx.ellipse(bolt.impactX, bolt.impactY, ringR, ringR * 0.48, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(240, 249, 255, ${(flicker * 0.55).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.ellipse(bolt.impactX, bolt.impactY, ringR * 0.42, ringR * 0.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Main bolt outer bloom
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = glowColor;
+      ctx.lineWidth = 5.2 * flicker + 1.2;
+      ctx.beginPath();
+      bolt.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+
+      // Forked secondary branches
+      ctx.lineWidth = 2.4 * flicker + 0.7;
+      ctx.beginPath();
+      for (const br of bolt.branches) {
+        br.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      }
+      ctx.stroke();
+
+      // Crisp incandescent core
+      ctx.strokeStyle = coreColor;
+      ctx.lineWidth = 1.9 * flicker + 0.5;
+      ctx.beginPath();
+      bolt.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+    }
+
+    // 3. Elevated Billowing Storm Cloud Canopy hovering high above the cell
+    const canopyY = cell.isoY - 210;
+    const baseScale = (cell.radiusIso / 290) * 1.05;
+    const lobes = [
+      { ox: -cell.radiusIso * 0.32, oy: 12, s: 0.92, idx: 0, alpha: 0.72 },
+      { ox: cell.radiusIso * 0.28, oy: 16, s: 0.88, idx: 1, alpha: 0.7 },
+      { ox: 0, oy: -12, s: 1.12, idx: 2, alpha: 0.82 },
+    ];
+
+    for (const lobe of lobes) {
+      const sprite = atlas.stormClouds[(Math.floor(cell.seed) + lobe.idx) % atlas.stormClouds.length];
+      const sway = Math.sin(time * 0.55 + cell.seed + lobe.idx * 2.1) * 8;
+      const w = sprite.width * baseScale * lobe.s;
+      const h = sprite.height * baseScale * lobe.s;
+      ctx.globalAlpha = cell.intensity * lobe.alpha;
+      ctx.drawImage(
+        sprite,
+        cell.isoX + lobe.ox + sway - w * 0.5,
+        canopyY + lobe.oy - h * 0.5,
+        w,
+        h
+      );
+    }
+
+    // Internal thunderhead sheet-lightning glow when discharging
+    if (cell.flash > 0.03) {
+      const glowR = cell.radiusIso * 0.66;
+      const g = ctx.createRadialGradient(cell.isoX, canopyY + 6, 8, cell.isoX, canopyY + 6, glowR);
+      g.addColorStop(0, `rgba(224, 242, 254, ${(cell.flash * 0.45).toFixed(3)})`);
+      g.addColorStop(0.55, `rgba(147, 197, 253, ${(cell.flash * 0.18).toFixed(3)})`);
+      g.addColorStop(1, 'rgba(147, 197, 253, 0)');
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(cell.isoX, canopyY + 6, glowR, glowR * 0.48, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawWeatherScreenOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  weather: WeatherState,
+  camera: CameraState,
+  time: number
+): void {
+  const localStorm = getLocalizedStormFactorAtIso(weather, camera.x, camera.y);
+  const effectiveRain = Math.min(1, weather.rainIntensity + localStorm * 0.48);
+  const effectiveStorm = Math.min(1, weather.stormIntensity * 0.72 + localStorm * 0.58);
+
+  if (effectiveRain <= 0.025 && effectiveStorm <= 0.04 && weather.globalFlash <= 0.01) {
+    return;
+  }
+
+  ctx.save();
+
+  // 1. Two-Layer Batched Screen-Space Rainfall (camera-coupled so panning stays silky & grounded)
+  if (effectiveRain > 0.025) {
+    const windDx = 0.16 + weather.windStrength * 0.22 + localStorm * 0.1;
+    const camShiftX = camera.x * camera.zoom;
+    const camShiftY = camera.y * camera.zoom;
+
+    // Back layer: finer atmospheric mist-rain streaks
+    const backCount = Math.floor(42 + effectiveRain * 78);
+    const backLen = 14 + effectiveRain * 12;
+    const backSpeed = 520 + weather.windStrength * 240;
+    const backAlpha = Math.min(0.32, 0.09 + effectiveRain * 0.19);
+    ctx.strokeStyle = `rgba(198, 226, 248, ${backAlpha.toFixed(3)})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < backCount; i++) {
+      const seedX = (i * 197.37) % width;
+      const seedY = (i * 313.19) % height;
+      const speedVar = 0.85 + (i % 5) * 0.08;
+      const x =
+        (((seedX - camShiftX * 0.25 + time * backSpeed * windDx * speedVar) % width) + width) %
+        width;
+      const y =
+        (((seedY - camShiftY * 0.25 + time * backSpeed * speedVar) % height) + height) % height;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + backLen * windDx, y + backLen);
+    }
+    ctx.stroke();
+
+    // Front layer: crisper foreground raindrops
+    const frontCount = Math.floor(24 + effectiveRain * 64);
+    const frontLen = 20 + effectiveRain * 18;
+    const frontSpeed = 760 + weather.windStrength * 310;
+    const frontAlpha = Math.min(0.46, 0.13 + effectiveRain * 0.28);
+    ctx.strokeStyle = `rgba(224, 242, 255, ${frontAlpha.toFixed(3)})`;
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    for (let i = 0; i < frontCount; i++) {
+      const seedX = (i * 271.91 + 43) % width;
+      const seedY = (i * 179.47 + 29) % height;
+      const speedVar = 0.88 + (i % 4) * 0.09;
+      const x =
+        (((seedX - camShiftX * 0.45 + time * frontSpeed * windDx * speedVar) % width) + width) %
+        width;
+      const y =
+        (((seedY - camShiftY * 0.45 + time * frontSpeed * speedVar) % height) + height) % height;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + frontLen * windDx, y + frontLen);
+    }
+    ctx.stroke();
+  }
+
+  // 2. Subtle atmospheric storm edge vignette for depth (never obscures center playfield)
+  if (effectiveStorm > 0.08) {
+    const rOuter = Math.hypot(width, height) * 0.62;
+    const vig = ctx.createRadialGradient(
+      width * 0.5,
+      height * 0.5,
+      rOuter * 0.46,
+      width * 0.5,
+      height * 0.5,
+      rOuter
+    );
+    vig.addColorStop(0, 'rgba(12, 22, 38, 0)');
+    vig.addColorStop(1, `rgba(10, 18, 34, ${(effectiveStorm * 0.28).toFixed(3)})`);
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  // 3. Gentle sheet-lightning ambient flash when a localized bolt cracks on/near screen
+  if (weather.globalFlash > 0.015) {
+    ctx.fillStyle = `rgba(218, 238, 255, ${(weather.globalFlash * 0.11).toFixed(3)})`;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  ctx.restore();
 }
 
 function drawSkyBirds(
   ctx: CanvasRenderingContext2D,
   time: number,
   camera: CameraState,
-  viewW: number
+  viewW: number,
+  sunVisibility: number
 ): void {
+  if (sunVisibility <= 0.12) return;
   const span = Math.max(2200, viewW * 2.2);
   ctx.save();
-  ctx.strokeStyle = 'rgba(248, 244, 232, 0.58)';
+  ctx.strokeStyle = `rgba(248, 244, 232, ${(0.58 * sunVisibility).toFixed(3)})`;
   ctx.lineWidth = 1.4;
   ctx.lineCap = 'round';
 
@@ -4898,8 +5342,10 @@ function drawAmbientSkyMotes(
   time: number,
   camera: CameraState,
   viewW: number,
-  viewH: number
+  viewH: number,
+  sunVisibility: number
 ): void {
+  if (sunVisibility <= 0.14) return;
   const halfW = (viewW * 0.6) / Math.max(0.4, camera.zoom);
   const halfH = (viewH * 0.6) / Math.max(0.4, camera.zoom);
   ctx.save();
@@ -4912,8 +5358,11 @@ function drawAmbientSkyMotes(
       camera.y -
       halfH +
       (((i * 131.7 - time * (6 + (i % 3) * 2.5)) % (halfH * 2)) + halfH * 2) % (halfH * 2);
-    const twinkle = 0.25 + 0.55 * Math.abs(Math.sin(time * 1.8 + i * 1.7));
-    ctx.fillStyle = i % 3 === 0 ? `rgba(255, 248, 196, ${twinkle.toFixed(2)})` : `rgba(255, 255, 240, ${(twinkle * 0.7).toFixed(2)})`;
+    const twinkle = (0.25 + 0.55 * Math.abs(Math.sin(time * 1.8 + i * 1.7))) * sunVisibility;
+    ctx.fillStyle =
+      i % 3 === 0
+        ? `rgba(255, 248, 196, ${twinkle.toFixed(2)})`
+        : `rgba(255, 255, 240, ${(twinkle * 0.7).toFixed(2)})`;
     ctx.beginPath();
     ctx.arc(px, py, 1.3 + (i % 2) * 0.8, 0, Math.PI * 2);
     ctx.fill();
@@ -5473,6 +5922,33 @@ export function renderMinimap(
     ctx.beginPath();
     ctx.arc(mapX(p.x, p.y), mapY(p.x, p.y), 3.0, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  // Localized Thunderstorm Cells drifting across the minimap
+  if (state.weather.cells.length > 0) {
+    ctx.save();
+    for (const cell of state.weather.cells) {
+      if (cell.intensity <= 0.08) continue;
+      const cx = ((cell.isoX - bounds.minX) / bounds.spanX) * width;
+      const cy = ((cell.isoY - bounds.minY) / bounds.spanY) * height;
+      const rx = Math.max(6, (cell.radiusIso / bounds.spanX) * width);
+      const ry = Math.max(4, ((cell.radiusIso * 0.6) / bounds.spanY) * height);
+      ctx.fillStyle =
+        cell.flash > 0.15
+          ? `rgba(186, 230, 253, ${(0.24 + cell.flash * 0.28).toFixed(3)})`
+          : `rgba(15, 23, 42, ${(cell.intensity * 0.42).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle =
+        cell.flash > 0.15
+          ? `rgba(253, 224, 71, ${(0.45 + cell.flash * 0.45).toFixed(3)})`
+          : `rgba(125, 211, 252, ${(cell.intensity * 0.42).toFixed(3)})`;
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   const camLeft = ((camera.x - (viewW * 0.5) / camera.zoom - bounds.minX) / bounds.spanX) * width;

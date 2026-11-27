@@ -130,6 +130,7 @@ export type AudioHookEvent =
   | { type: 'PRIEST_STUNNED'; isPlayer: boolean; tx: number; ty: number }
   | { type: 'PRIEST_CAPTURED'; byPlayer: boolean; tx: number; ty: number }
   | { type: 'SACRIFICE_BEGUN'; fury: Fury; isGrand: boolean; tx: number; ty: number }
+  | { type: 'WEATHER_THUNDER'; intensity: number; tx: number; ty: number }
   | { type: 'VICTORY' }
   | { type: 'DEFEAT' }
   | { type: 'UI_ROTATE' }
@@ -160,6 +161,8 @@ export class WebAudioManager {
   private ambienceDesiredActive = false;
   private ambienceFury: Fury = 'WIND';
   private ambienceIntensity = 0.5;
+  private weatherRainLevel = 0;
+  private weatherStormLevel = 0;
 
   private muted = false;
   private musicVolume = 0.65;
@@ -617,6 +620,11 @@ export class WebAudioManager {
       case 'SACRIFICE_BEGUN':
         this.playSacrifice(event.fury, event.isGrand, { pan: spatial.pan, gain: 1 });
         break;
+      case 'WEATHER_THUNDER':
+        if (spatial.gain > 0.14) {
+          this.playDistantThunder(event.intensity, spatial);
+        }
+        break;
       case 'VICTORY':
         this.playVictory();
         break;
@@ -633,6 +641,23 @@ export class WebAudioManager {
     this.ambienceDesiredActive = active;
     this.ambienceFury = fury;
     this.ambienceIntensity = Math.max(0.15, Math.min(1, intensity));
+    this.syncAmbience();
+  }
+
+  /**
+   * Smoothly blends rain shimmer and storm rumble texture into the ambient bed.
+   */
+  public setWeatherAmbience(rainIntensity: number, stormIntensity: number): void {
+    const nextRain = clampUnit(rainIntensity);
+    const nextStorm = clampUnit(stormIntensity);
+    if (
+      Math.abs(nextRain - this.weatherRainLevel) < 0.03 &&
+      Math.abs(nextStorm - this.weatherStormLevel) < 0.03
+    ) {
+      return;
+    }
+    this.weatherRainLevel = nextRain;
+    this.weatherStormLevel = nextStorm;
     this.syncAmbience();
   }
 
@@ -741,15 +766,22 @@ export class WebAudioManager {
     }
 
     if (this.ambienceFilter) {
-      const targetFreq =
+      const baseFreq =
         this.ambienceFury === 'WIND' ? 540 : this.ambienceFury === 'RAIN' ? 880 : 260;
-      const targetQ =
+      const baseQ =
         this.ambienceFury === 'WIND' ? 1.5 : this.ambienceFury === 'RAIN' ? 0.7 : 1.1;
-      this.ambienceFilter.frequency.setTargetAtTime(targetFreq, now, 0.4);
-      this.ambienceFilter.Q.setTargetAtTime(targetQ, now, 0.4);
+      // Rain widens the pink-noise shimmer upward; localized thunderstorms deepen the bed slightly
+      const rainLift = this.weatherRainLevel * 520 - this.weatherStormLevel * 180;
+      const targetFreq = Math.max(180, Math.min(1650, baseFreq + rainLift));
+      const targetQ = Math.max(0.45, baseQ - this.weatherRainLevel * 0.45);
+      this.ambienceFilter.frequency.setTargetAtTime(targetFreq, now, 0.55);
+      this.ambienceFilter.Q.setTargetAtTime(targetQ, now, 0.55);
     }
 
-    const targetAmp = shouldPlay ? (0.022 + this.ambienceIntensity * 0.024) * this.sfxVolume : 0;
+    const weatherBoost = this.weatherRainLevel * 0.012 + this.weatherStormLevel * 0.01;
+    const targetAmp = shouldPlay
+      ? (0.022 + this.ambienceIntensity * 0.024 + weatherBoost) * this.sfxVolume
+      : 0;
     this.ambienceBus.gain.cancelScheduledValues(now);
     this.ambienceBus.gain.setTargetAtTime(targetAmp, now, shouldPlay ? 0.45 : 0.15);
   }
@@ -1429,6 +1461,41 @@ export class WebAudioManager {
         break;
       }
     }
+  }
+
+  public playDistantThunder(
+    intensity = 0.75,
+    spatial: AudioSpatialContext = DEFAULT_SPATIAL
+  ): void {
+    const ctx = this.getContext();
+    if (!ctx || !this.throttle('weather_thunder', 2800)) return;
+    const clampedGain = Math.max(0.05, Math.min(0.85, spatial.gain * intensity * 0.75));
+    if (clampedGain < 0.08) return;
+
+    const now = ctx.currentTime;
+    const out = this.createSpatialOut(ctx, { pan: spatial.pan, gain: clampedGain });
+
+    // Distant crisp crack followed by a warm rolling sub-bass thunder swell
+    this.triggerNoiseBurst(ctx, out, {
+      startAt: now + 0.04,
+      duration: 0.42,
+      volume: 0.055,
+      filterType: 'bandpass',
+      startFreq: 680,
+      endFreq: 190,
+      q: 0.9,
+      attack: 0.025,
+    });
+    this.triggerNoiseBurst(ctx, out, {
+      startAt: now + 0.14,
+      duration: 1.65,
+      volume: 0.095,
+      filterType: 'lowpass',
+      startFreq: 210,
+      endFreq: 58,
+      q: 0.8,
+      attack: 0.22,
+    });
   }
 
   public playBridgeBreak(spatial: AudioSpatialContext = DEFAULT_SPATIAL): void {

@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  CloudLightning,
+  CloudRain,
   Compass,
   Crosshair,
   Crown,
@@ -14,6 +16,7 @@ import {
   Settings,
   Shield,
   Sparkles,
+  Sun,
   Target,
   Volume2,
   VolumeX,
@@ -382,6 +385,31 @@ export function GameHud({
           body: 'Pull the camera back to survey more islands and incoming bridge assaults.',
           meta: 'You can also scroll down with the mouse wheel or pinch on touch screens.',
         };
+      case 'weather': {
+        const w = hud.weather;
+        const body =
+          w.phase === 'THUNDERSTORM'
+            ? 'Localized thunderheads sweep across the archipelago with slanted downpours and forked sky-lightning.'
+            : w.phase === 'LIGHT_RAIN'
+              ? 'Silver storm clouds drift overhead, bringing steady rain streaks and rippling drops across islands and sky-bridges.'
+              : 'Sunlit golden-hour skies illuminate the floating islands with drifting cumulus clouds and gentle sky-winds.';
+        const meta =
+          w.activeStormCells > 0
+            ? `${w.activeStormCells} localized storm cell${w.activeStormCells === 1 ? '' : 's'} active on the map (visible on minimap).`
+            : 'Atmospheric sky cycle — purely visual ambiance.';
+        return {
+          title: w.label,
+          badge: 'Atmosphere',
+          accent:
+            w.phase === 'THUNDERSTORM'
+              ? '#c084fc'
+              : w.phase === 'LIGHT_RAIN'
+                ? '#7dd3fc'
+                : '#fde047',
+          body,
+          meta,
+        };
+      }
       case 'zoom_in':
         return {
           title: 'Zoom In',
@@ -1046,12 +1074,27 @@ export function GameHud({
         >
           <div className="stone-frame rounded-lg px-1.5 sm:px-2 py-1 flex items-center gap-1 text-xs whitespace-nowrap">
             {!isUltraCompactTop && (
-              <span
-                {...tipProps('clock')}
-                className="font-mono-tabular text-[#d3dfec] px-1.5 cursor-help"
-              >
-                {formatClock(hud.elapsedSeconds)}
-              </span>
+              <>
+                <span
+                  {...tipProps('weather')}
+                  className="inline-flex items-center px-1 cursor-help"
+                  aria-label={`Weather: ${hud.weather.label}`}
+                >
+                  {hud.weather.phase === 'THUNDERSTORM' ? (
+                    <CloudLightning className="w-3.5 h-3.5 text-[#c084fc]" />
+                  ) : hud.weather.phase === 'LIGHT_RAIN' ? (
+                    <CloudRain className="w-3.5 h-3.5 text-[#7dd3fc]" />
+                  ) : (
+                    <Sun className="w-3.5 h-3.5 text-[#fde047]" />
+                  )}
+                </span>
+                <span
+                  {...tipProps('clock')}
+                  className="font-mono-tabular text-[#d3dfec] px-1.5 cursor-help"
+                >
+                  {formatClock(hud.elapsedSeconds)}
+                </span>
+              </>
             )}
             <button
               type="button"

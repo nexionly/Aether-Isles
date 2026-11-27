@@ -84,6 +84,7 @@ import type {
   VictoryProgressSnapshot,
   VictoryRules,
 } from './types';
+import { buildWeatherHudSummary, getLocalizedStormFactorAtIso, updateWeatherState } from './weather';
 import { createInitialWorld, isoToTile, tileToIso, type WorldState } from './worldGen';
 
 export class SkybridgeEngine {
@@ -259,6 +260,7 @@ export class SkybridgeEngine {
   public startSkirmish(fury: Fury, difficulty: Difficulty, opponentCount = 1): void {
     this.audio.unlock();
     this.audio.setAmbience(true, fury, 0.52);
+    this.audio.setWeatherAmbience(0, 0);
     this.stormGustTimer = 8 + Math.random() * 6;
     const clampedOpp = clampOpponentCount(opponentCount);
     this.state = createInitialWorld(fury, difficulty, clampedOpp, this.victoryRules);
@@ -1390,6 +1392,64 @@ export class SkybridgeEngine {
 
       this.animTime += clampedDt;
       this.updateCamera(clampedDt);
+
+      if (this.phase === 'PLAYING' || this.phase === 'TITLE_MENU') {
+        const prevWeatherPhase = this.state.weather.phase;
+        const weatherDt =
+          this.phase === 'PLAYING'
+            ? clampedDt * Math.min(this.speedMultiplier, 1.8)
+            : clampedDt * 0.55;
+        const strikes = updateWeatherState(
+          this.state.weather,
+          weatherDt,
+          this.state.gridSize,
+          this.state.islands,
+          this.state.factions.PLAYER.fury,
+          { x: this.camera.x, y: this.camera.y }
+        );
+
+        if (this.phase === 'PLAYING') {
+          const localStorm = getLocalizedStormFactorAtIso(
+            this.state.weather,
+            this.camera.x,
+            this.camera.y
+          );
+          this.audio.setWeatherAmbience(
+            Math.min(1, this.state.weather.rainIntensity + localStorm * 0.35),
+            Math.min(1, this.state.weather.stormIntensity * 0.65 + localStorm * 0.55)
+          );
+
+          for (const strike of strikes) {
+            const { sx, sy } = worldToScreen(
+              strike.isoX,
+              strike.isoY,
+              this.camera,
+              this.viewW,
+              this.viewH
+            );
+            const halfW = Math.max(1, this.viewW * 0.5);
+            const halfH = Math.max(1, this.viewH * 0.5);
+            const normDist = Math.hypot((sx - halfW) / halfW, (sy - halfH) / halfH);
+            if (normDist < 1.35) {
+              const proximity = Math.max(0, 1 - normDist / 1.35);
+              this.state.weather.globalFlash = Math.max(
+                this.state.weather.globalFlash,
+                (0.28 + proximity * 0.68) * strike.intensity
+              );
+              this.emitAudio({
+                type: 'WEATHER_THUNDER',
+                intensity: (0.4 + proximity * 0.6) * strike.intensity,
+                tx: strike.isoX,
+                ty: strike.isoY,
+              });
+            }
+          }
+
+          if (this.state.weather.phase !== prevWeatherPhase) {
+            this.emitHud();
+          }
+        }
+      }
 
       if (this.phase === 'PLAYING') {
         this.stormGustTimer -= clampedDt;
@@ -5247,6 +5307,7 @@ export class SkybridgeEngine {
       playerPriestMaxHp: playerPriest?.maxHp ?? 240,
       playerPriestState: playerPriest?.state ?? 'ACTIVE',
       playerPriestShieldTimer: Math.ceil(playerPriest?.shieldTimer ?? 0),
+      weather: buildWeatherHudSummary(this.state.weather),
       priestAbilities,
       aiPriestHp: primaryRival?.hp ?? 0,
       aiPriestMaxHp: primaryRival?.maxHp ?? 240,
